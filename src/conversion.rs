@@ -1043,7 +1043,22 @@ fn parse_gerber(source: &str) -> Vec<Primitive> {
     let mut region_points = Vec::new();
 
     for raw in source.split('*') {
-        let command = raw.trim();
+        // RS-274X extended-code blocks use "%...CMD...*%" syntax.  When two such blocks
+        // appear on consecutive lines (e.g. "%TF...*%\r\n%FSLAX46Y46*%"), splitting the
+        // whole source by '*' yields a chunk like "%\r\n%FSLAX46Y46".  The leading
+        // "%" + whitespace is the closing delimiter of the previous block; strip it so
+        // the actual command content ("%FSLAX46Y46") is recognized correctly.
+        let raw_trimmed = raw.trim();
+        let command = if let Some(rest) = raw_trimmed.strip_prefix('%') {
+            let after_ws = rest.trim_start();
+            if after_ws.starts_with('%') {
+                after_ws   // e.g. "%\r\n%FSLAX46Y46" → "%FSLAX46Y46"
+            } else {
+                raw_trimmed
+            }
+        } else {
+            raw_trimmed
+        };
         if command.is_empty() {
             continue;
         }
@@ -1968,5 +1983,35 @@ mod tests {
             .map(|pt| pt[0])
             .fold(f32::NEG_INFINITY, f32::max);
         assert!(max_x > 0.0, "toolpath x coords must be positive mm values");
+    }
+
+    #[test]
+    fn real_gerber_zip_renders_to_expected_size() {
+        // Board outline (Edge_Cuts) is ~31.85 × 17.15 mm.
+        // At 1000 DPI (39.37 px/mm) + 0.82 mm margin on each side → ~1319 × 740 px.
+        let zip = std::path::Path::new("test_files/inputs/gerber.zip");
+        if !zip.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("out.png");
+        let result = gerber_inputs_to_png(
+            &[zip.to_path_buf()],
+            &png_path,
+            ConversionSettings::default(),
+        )
+        .unwrap();
+        // Previously broken: format spec was not parsed, yielding ~450k × 390k pixels.
+        assert!(
+            result.width < 2000,
+            "render width {} is too large — coordinate format likely misread (was {}×{})",
+            result.width, result.width, result.height
+        );
+        assert!(
+            result.height < 2000,
+            "render height {} is too large — coordinate format likely misread",
+            result.height
+        );
+        assert!(result.dark_pixels > 0, "no dark pixels rendered");
     }
 }
