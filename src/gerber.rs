@@ -555,11 +555,11 @@ struct GerberState {
     triangles: Vec<Triangle>,
 
     sr_active: bool,
-    sr_remaining: (i32, i32),
     sr_original: (i32, i32),
     sr_distance: (f64, f64),
+    sr_saved_count: usize,
+    sr_saved_current: Point2<f64>,
     sr_recorded: Vec<Command>,
-    sr_phase: usize,
 
     ab_active: bool,
     ab_code: Option<i32>,
@@ -581,11 +581,11 @@ impl GerberState {
             in_region: false,
             triangles: Vec::new(),
             sr_active: false,
-            sr_remaining: (0, 0),
             sr_original: (0, 0),
             sr_distance: (0.0, 0.0),
+            sr_saved_count: 0,
+            sr_saved_current: Point2::new(0.0, 0.0),
             sr_recorded: Vec::new(),
-            sr_phase: 0,
             ab_active: false,
             ab_code: None,
             ab_recorded: Vec::new(),
@@ -600,6 +600,18 @@ impl GerberState {
     }
 
     fn process_command(&mut self, cmd: &Command) {
+        if self.sr_active {
+            match cmd {
+                Command::ExtendedCode(ExtendedCode::StepAndRepeat(_)) => {}
+                _ => self.sr_recorded.push(cmd.clone()),
+            }
+        }
+        if self.ab_active {
+            match cmd {
+                Command::ExtendedCode(ExtendedCode::ApertureBlock(_)) => {}
+                _ => self.ab_recorded.push(cmd.clone()),
+            }
+        }
         match cmd {
             Command::ExtendedCode(ext) => self.process_extended(ext),
             Command::FunctionCode(func) => self.process_function(func),
@@ -629,16 +641,34 @@ impl GerberState {
                     distance_y,
                 } => {
                     self.sr_active = true;
-                    self.sr_remaining = (*repeat_x as i32, *repeat_y as i32);
                     self.sr_original = (*repeat_x as i32, *repeat_y as i32);
                     self.sr_distance = (*distance_x, *distance_y);
+                    self.sr_saved_count = self.triangles.len();
+                    self.sr_saved_current = self.current;
                     self.sr_recorded.clear();
-                    self.sr_phase = 0;
                 }
                 StepAndRepeat::Close => {
                     if self.sr_active {
-                        let saved_triangles = std::mem::take(&mut self.triangles);
-                        self.triangles = saved_triangles;
+                        let base: Vec<Triangle> = self.triangles.drain(self.sr_saved_count..).collect();
+                        let dx = self.sr_distance.0 * self.scale_mm;
+                        let dy = self.sr_distance.1 * self.scale_mm;
+                        for rep_x in 0..self.sr_original.0 {
+                            for rep_y in 0..self.sr_original.1 {
+                                if rep_x == 0 && rep_y == 0 {
+                                    continue;
+                                }
+                                let ox = rep_x as f64 * dx;
+                                let oy = rep_y as f64 * dy;
+                                for tri in &base {
+                                    self.triangles.push(Triangle {
+                                        v0: Point2::new(tri.v0.x + ox, tri.v0.y + oy),
+                                        v1: Point2::new(tri.v1.x + ox, tri.v1.y + oy),
+                                        v2: Point2::new(tri.v2.x + ox, tri.v2.y + oy),
+                                    });
+                                }
+                            }
+                        }
+                        self.current = self.sr_saved_current;
                         self.sr_active = false;
                     }
                 }
@@ -988,7 +1018,7 @@ impl GerberState {
     }
 }
 
-fn eval_decimal(dec: &MacroDecimal, vars: &[f64]) -> f64 {
+pub fn eval_decimal(dec: &MacroDecimal, vars: &[f64]) -> f64 {
     match dec {
         MacroDecimal::Value(v) => *v,
         MacroDecimal::Variable(idx) => {
@@ -1003,7 +1033,7 @@ fn eval_decimal(dec: &MacroDecimal, vars: &[f64]) -> f64 {
     }
 }
 
-fn eval_macro_bool(b: &MacroBoolean, vars: &[f64]) -> Option<bool> {
+pub fn eval_macro_bool(b: &MacroBoolean, vars: &[f64]) -> Option<bool> {
     match b {
         MacroBoolean::Value(v) => Some(*v),
         MacroBoolean::Variable(idx) => {
@@ -1021,7 +1051,7 @@ fn eval_macro_bool(b: &MacroBoolean, vars: &[f64]) -> Option<bool> {
     }
 }
 
-fn eval_macro_int(val: &MacroInteger, vars: &[f64]) -> u32 {
+pub fn eval_macro_int(val: &MacroInteger, vars: &[f64]) -> u32 {
     match val {
         MacroInteger::Value(v) => *v,
         MacroInteger::Variable(idx) => {
