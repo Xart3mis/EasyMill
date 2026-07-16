@@ -756,8 +756,15 @@ impl GerberState {
 
                     self.current = target;
                 }
-                Operation::Flash(_coords) => {
-                    let pos = self.current;
+                Operation::Flash(coords) => {
+                    let pos = match coords {
+                        Some(c) => {
+                            let p = self.coords_to_point(c);
+                            self.current = p;
+                            p
+                        }
+                        None => self.current,
+                    };
                     if let Some(ref aperture_code) = self.current_aperture {
                         if let Some(aperture) = self.apertures.get(aperture_code) {
                             let tris = self.tessellate_aperture(aperture, pos);
@@ -1148,4 +1155,144 @@ pub fn render_triangles_to_png(
         height,
         dark_pixels,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eval_simple_decimal() {
+        assert_eq!(eval_decimal(&MacroDecimal::Value(3.14), &[]), 3.14);
+    }
+
+    #[test]
+    fn eval_variable_decimal() {
+        assert_eq!(eval_decimal(&MacroDecimal::Variable(1), &[42.0]), 42.0);
+    }
+
+    #[test]
+    fn eval_expression_addition() {
+        let e = MacroDecimal::Expression("$1+$2".to_string());
+        assert_eq!(eval_decimal(&e, &[10.0, 20.0]), 30.0);
+    }
+
+    #[test]
+    fn eval_expression_complex() {
+        let e = MacroDecimal::Expression("$1*($2+$3)/2".to_string());
+        assert_eq!(eval_decimal(&e, &[2.0, 10.0, 20.0]), 30.0);
+    }
+
+    #[test]
+    fn eval_bool_expression() {
+        let b = MacroBoolean::Expression("$1".to_string());
+        assert_eq!(eval_macro_bool(&b, &[5.0, 3.0]), Some(true));
+        assert_eq!(eval_macro_bool(&b, &[0.0]), Some(false));
+    }
+
+    #[test]
+    fn tessellate_circle_returns_triangles() {
+        let tris = tessellate_aperture_circle(Point2::new(0.0, 0.0), 1.0);
+        assert!(!tris.is_empty());
+    }
+
+    #[test]
+    fn tessellate_rect_returns_triangles() {
+        let tris = tessellate_aperture_rect(Point2::new(0.0, 0.0), 2.0, 1.0);
+        assert!(!tris.is_empty());
+    }
+
+    #[test]
+    fn tessellate_oval_returns_triangles() {
+        let tris = tessellate_aperture_oval(Point2::new(0.0, 0.0), 2.0, 1.0);
+        assert!(!tris.is_empty());
+    }
+
+    #[test]
+    fn tessellate_thick_line_returns_triangles() {
+        let tris = tessellate_thick_line(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0), 0.5);
+        assert!(!tris.is_empty());
+    }
+
+    #[test]
+    fn tessellate_polygon_returns_triangles() {
+        let pts = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 10.0),
+            Point2::new(0.0, 10.0),
+        ];
+        let tris = tessellate_polygon(&pts);
+        assert!(!tris.is_empty());
+    }
+
+    #[test]
+    fn rasterize_triangles_produces_dark_pixels() {
+        let width = 100u32;
+        let height = 100u32;
+        let mut image = image::GrayImage::from_pixel(width, height, image::Luma([0]));
+        let tris = tessellate_aperture_circle(Point2::new(50.0, 50.0), 20.0);
+        let offset = nalgebra::Vector2::new(0.0, 0.0);
+        rasterize_triangles(&mut image, &tris, width, height, 1.0, offset, 255);
+        let dark = image.pixels().filter(|p| p[0] > 0).count();
+        assert!(dark > 0);
+    }
+
+    #[test]
+    fn interpolate_arc_produces_points() {
+        let pts = interpolate_arc(
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            0.0,
+            10.0,
+            false,
+            false,
+            64,
+        );
+        assert!(pts.len() >= 2);
+    }
+
+    #[test]
+    fn simple_gerber_line_produces_triangles() {
+        let gerber = "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.300*%\nD10*\nX000000Y000000D02*\nX010000Y000000D01*\nM02*\n";
+        let tris = parse_to_shapes(gerber).unwrap();
+        assert!(!tris.is_empty(), "expected triangles from a simple line");
+    }
+
+    #[test]
+    fn simple_gerber_flash_produces_triangles() {
+        let gerber = "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.300*%\nD10*\nX050000Y050000D03*\nM02*\n";
+        let tris = parse_to_shapes(gerber).unwrap();
+        assert!(!tris.is_empty(), "expected triangles from a flash");
+    }
+
+    #[test]
+    fn parse_to_shapes_empty_on_invalid_gerber() {
+        let tris = parse_to_shapes("not gerber data").unwrap();
+        assert!(tris.is_empty());
+    }
+
+    #[test]
+    fn render_triangles_creates_png() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("render_test.png");
+        let tris = tessellate_aperture_circle(Point2::new(10.0, 10.0), 5.0);
+        let settings = ConversionSettings {
+            pixels_per_mm: 10.0,
+            ..ConversionSettings::default()
+        };
+        let result = render_triangles_to_png(&tris, &png_path, &settings).unwrap();
+        assert!(png_path.exists());
+        assert!(result.dark_pixels > 0);
+    }
+
+    #[test]
+    fn render_empty_triangles_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("empty.png");
+        let settings = ConversionSettings::default();
+        let result = render_triangles_to_png(&[], &png_path, &settings);
+        assert!(result.is_err());
+    }
 }

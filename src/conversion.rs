@@ -1322,7 +1322,7 @@ mod tests {
         let png_path = dir.path().join("preview.png");
         fs::write(
             &gerber_path,
-            "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.300*%\nD10*\nX000000Y000000D02*\nX2000000Y000000D01*\nM02*\n",
+            "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.300*%\nD10*\nX000000Y000000D02*\nX999999Y999999D01*\nM02*\n",
         )
         .unwrap();
 
