@@ -1,3 +1,12 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use gerber_types::{
+    Aperture, ApertureBlock, Command, DCode, ExtendedCode, FunctionCode, GCode,
+    InterpolationMode, MacroBoolean, MacroContent, MacroDecimal, MacroInteger, Operation,
+    QuadrantMode, StepAndRepeat, Unit,
+};
+use gerber_types::{CoordinateOffset, Coordinates};
 use image::{GrayImage, Luma};
 use lyon::path::Path as LPath;
 use lyon::tessellation::{
@@ -5,6 +14,8 @@ use lyon::tessellation::{
 };
 use lyon::math::Point as LPoint;
 use nalgebra::{Point2, Vector2};
+
+use crate::conversion::{ConversionError, ConversionSettings, PngRenderResult};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Triangle {
@@ -528,4 +539,583 @@ fn edge_x_intersect(x0: f64, y0: f64, x1: f64, y1: f64, y: f64) -> Option<f64> {
     } else {
         None
     }
+}
+
+#[allow(dead_code)]
+struct GerberState {
+    scale_mm: f64,
+    current: Point2<f64>,
+    interpolation: InterpolationMode,
+    quadrant_mode: QuadrantMode,
+    apertures: HashMap<i32, Aperture>,
+    macros: HashMap<String, gerber_types::ApertureMacro>,
+    current_aperture: Option<i32>,
+    region_points: Vec<Point2<f64>>,
+    in_region: bool,
+    triangles: Vec<Triangle>,
+
+    sr_active: bool,
+    sr_remaining: (i32, i32),
+    sr_original: (i32, i32),
+    sr_distance: (f64, f64),
+    sr_recorded: Vec<Command>,
+    sr_phase: usize,
+
+    ab_active: bool,
+    ab_code: Option<i32>,
+    ab_recorded: Vec<Command>,
+    ab_definitions: HashMap<i32, Vec<Command>>,
+}
+
+impl GerberState {
+    fn new() -> Self {
+        GerberState {
+            scale_mm: 1.0,
+            current: Point2::new(0.0, 0.0),
+            interpolation: InterpolationMode::Linear,
+            quadrant_mode: QuadrantMode::Multi,
+            apertures: HashMap::new(),
+            macros: HashMap::new(),
+            current_aperture: None,
+            region_points: Vec::new(),
+            in_region: false,
+            triangles: Vec::new(),
+            sr_active: false,
+            sr_remaining: (0, 0),
+            sr_original: (0, 0),
+            sr_distance: (0.0, 0.0),
+            sr_recorded: Vec::new(),
+            sr_phase: 0,
+            ab_active: false,
+            ab_code: None,
+            ab_recorded: Vec::new(),
+            ab_definitions: HashMap::new(),
+        }
+    }
+
+    fn process_commands(&mut self, commands: &[Command]) {
+        for cmd in commands {
+            self.process_command(cmd);
+        }
+    }
+
+    fn process_command(&mut self, cmd: &Command) {
+        match cmd {
+            Command::ExtendedCode(ext) => self.process_extended(ext),
+            Command::FunctionCode(func) => self.process_function(func),
+        }
+    }
+
+    fn process_extended(&mut self, ext: &ExtendedCode) {
+        match ext {
+            ExtendedCode::CoordinateFormat(_fmt) => {}
+            ExtendedCode::Unit(unit) => {
+                self.scale_mm = match unit {
+                    Unit::Millimeters => 1.0,
+                    Unit::Inches => 25.4,
+                };
+            }
+            ExtendedCode::ApertureDefinition(def) => {
+                self.apertures.insert(def.code, def.aperture.clone());
+            }
+            ExtendedCode::ApertureMacro(mac) => {
+                self.macros.insert(mac.name.clone(), mac.clone());
+            }
+            ExtendedCode::StepAndRepeat(sr) => match sr {
+                StepAndRepeat::Open {
+                    repeat_x,
+                    repeat_y,
+                    distance_x,
+                    distance_y,
+                } => {
+                    self.sr_active = true;
+                    self.sr_remaining = (*repeat_x as i32, *repeat_y as i32);
+                    self.sr_original = (*repeat_x as i32, *repeat_y as i32);
+                    self.sr_distance = (*distance_x, *distance_y);
+                    self.sr_recorded.clear();
+                    self.sr_phase = 0;
+                }
+                StepAndRepeat::Close => {
+                    if self.sr_active {
+                        let saved_triangles = std::mem::take(&mut self.triangles);
+                        self.triangles = saved_triangles;
+                        self.sr_active = false;
+                    }
+                }
+            },
+            ExtendedCode::ApertureBlock(ab) => match ab {
+                ApertureBlock::Open { code } => {
+                    self.ab_active = true;
+                    self.ab_code = Some(*code);
+                    self.ab_recorded.clear();
+                }
+                ApertureBlock::Close => {
+                    if self.ab_active {
+                        if let Some(code) = self.ab_code {
+                            self.ab_definitions
+                                .insert(code, std::mem::take(&mut self.ab_recorded));
+                        }
+                        self.ab_active = false;
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn process_function(&mut self, func: &FunctionCode) {
+        match func {
+            FunctionCode::DCode(dcode) => self.process_dcode(dcode),
+            FunctionCode::GCode(gcode) => self.process_gcode(gcode),
+            FunctionCode::MCode(_) => {}
+        }
+    }
+
+    fn process_dcode(&mut self, dcode: &DCode) {
+        match dcode {
+            DCode::SelectAperture(code) => {
+                self.current_aperture = Some(*code);
+            }
+            DCode::Operation(op) => match op {
+                Operation::Move(coords) => {
+                    if let Some(c) = coords {
+                        self.current = self.coords_to_point(c);
+                    }
+                }
+                Operation::Interpolate(coords, offset) => {
+                    let target = coords
+                        .as_ref()
+                        .map(|c| self.coords_to_point(c))
+                        .unwrap_or(self.current);
+
+                    if self.in_region {
+                        self.region_points.push(target);
+                    } else {
+                        match self.interpolation {
+                            InterpolationMode::Linear => {
+                                self.emit_thick_line(self.current, target);
+                            }
+                            InterpolationMode::ClockwiseCircular => {
+                                let (i, j) = self.offset_to_ij(offset);
+                                let pts = interpolate_arc(
+                                    self.current,
+                                    target,
+                                    i,
+                                    j,
+                                    true,
+                                    self.quadrant_mode == QuadrantMode::Multi,
+                                    64,
+                                );
+                                self.emit_thick_polyline(&pts);
+                            }
+                            InterpolationMode::CounterclockwiseCircular => {
+                                let (i, j) = self.offset_to_ij(offset);
+                                let pts = interpolate_arc(
+                                    self.current,
+                                    target,
+                                    i,
+                                    j,
+                                    false,
+                                    self.quadrant_mode == QuadrantMode::Multi,
+                                    64,
+                                );
+                                self.emit_thick_polyline(&pts);
+                            }
+                        }
+                    }
+
+                    self.current = target;
+                }
+                Operation::Flash(_coords) => {
+                    let pos = self.current;
+                    if let Some(ref aperture_code) = self.current_aperture {
+                        if let Some(aperture) = self.apertures.get(aperture_code) {
+                            let tris = self.tessellate_aperture(aperture, pos);
+                            self.triangles.extend(tris);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    fn coords_to_point(&self, coords: &Coordinates) -> Point2<f64> {
+        let x = coords
+            .x
+            .as_ref()
+            .map(|cn| f64::from(*cn) * self.scale_mm)
+            .unwrap_or(self.current.x);
+        let y = coords
+            .y
+            .as_ref()
+            .map(|cn| f64::from(*cn) * self.scale_mm)
+            .unwrap_or(self.current.y);
+        Point2::new(x, y)
+    }
+
+    fn offset_to_ij(&self, offset: &Option<CoordinateOffset>) -> (f64, f64) {
+        match offset {
+            Some(o) => {
+                let i = o
+                    .x
+                    .as_ref()
+                    .map(|cn| f64::from(*cn) * self.scale_mm)
+                    .unwrap_or(0.0);
+                let j = o
+                    .y
+                    .as_ref()
+                    .map(|cn| f64::from(*cn) * self.scale_mm)
+                    .unwrap_or(0.0);
+                (i, j)
+            }
+            None => (0.0, 0.0),
+        }
+    }
+
+    fn process_gcode(&mut self, gcode: &GCode) {
+        match gcode {
+            GCode::InterpolationMode(mode) => {
+                self.interpolation = *mode;
+            }
+            GCode::RegionMode(enabled) => {
+                if *enabled {
+                    self.in_region = true;
+                    self.region_points.clear();
+                } else {
+                    self.in_region = false;
+                    if self.region_points.len() >= 3 {
+                        let pts = std::mem::take(&mut self.region_points);
+                        let tris = tessellate_polygon(&pts);
+                        self.triangles.extend(tris);
+                    } else {
+                        self.region_points.clear();
+                    }
+                }
+            }
+            GCode::QuadrantMode(mode) => {
+                self.quadrant_mode = *mode;
+            }
+            _ => {}
+        }
+    }
+
+    fn tessellate_aperture(&self, aperture: &Aperture, center: Point2<f64>) -> Vec<Triangle> {
+        match aperture {
+            Aperture::Circle(c) => {
+                tessellate_aperture_circle(center, c.diameter * self.scale_mm)
+            }
+            Aperture::Rectangle(r) => {
+                tessellate_aperture_rect(center, r.x * self.scale_mm, r.y * self.scale_mm)
+            }
+            Aperture::Obround(r) => {
+                tessellate_aperture_oval(center, r.x * self.scale_mm, r.y * self.scale_mm)
+            }
+            Aperture::Polygon(p) => {
+                let rotation = p.rotation.unwrap_or(0.0);
+                tessellate_aperture_polygon(
+                    center,
+                    p.diameter * self.scale_mm,
+                    p.vertices as u32,
+                    rotation,
+                )
+            }
+            Aperture::Macro(name, args) => {
+                if let Some(mac) = self.macros.get(name) {
+                    self.expand_macro(mac, args.as_deref().unwrap_or(&[]), center)
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn expand_macro(
+        &self,
+        mac: &gerber_types::ApertureMacro,
+        args: &[MacroDecimal],
+        center: Point2<f64>,
+    ) -> Vec<Triangle> {
+        let mut vars: Vec<f64> = args.iter().map(|a| eval_expression(a, &[])).collect();
+
+        let mut triangles = Vec::new();
+
+        for content in &mac.content {
+            match content {
+                MacroContent::VariableDefinition(var_def) => {
+                    let idx = var_def.number;
+                    let val = eval_expression_str(&var_def.expression, &vars);
+                    let idx_usize = idx as usize;
+                    if idx_usize >= 1 {
+                        if idx_usize <= vars.len() {
+                            vars[idx_usize - 1] = val;
+                        } else {
+                            vars.resize(idx_usize, 0.0);
+                            vars[idx_usize - 1] = val;
+                        }
+                    }
+                }
+                MacroContent::Circle(c) => {
+                    let exposure = eval_macro_bool(&c.exposure, &vars);
+                    if exposure.is_none() || exposure == Some(false) {
+                        continue;
+                    }
+                    let diameter = eval_decimal(&c.diameter, &vars) * self.scale_mm;
+                    let cx = eval_decimal(&c.center.0, &vars) * self.scale_mm + center.x;
+                    let cy = eval_decimal(&c.center.1, &vars) * self.scale_mm + center.y;
+                    triangles.extend(tessellate_aperture_circle(
+                        Point2::new(cx, cy),
+                        diameter,
+                    ));
+                }
+                MacroContent::VectorLine(vl) => {
+                    let exposure = eval_macro_bool(&vl.exposure, &vars);
+                    if exposure.is_none() || exposure == Some(false) {
+                        continue;
+                    }
+                    let width = eval_decimal(&vl.width, &vars) * self.scale_mm;
+                    let sx = eval_decimal(&vl.start.0, &vars) * self.scale_mm;
+                    let sy = eval_decimal(&vl.start.1, &vars) * self.scale_mm;
+                    let ex = eval_decimal(&vl.end.0, &vars) * self.scale_mm;
+                    let ey = eval_decimal(&vl.end.1, &vars) * self.scale_mm;
+
+                    let angle = eval_decimal(&vl.angle, &vars);
+                    let (sx, sy, ex, ey) = if angle.abs() > 1e-10 {
+                        let rad = angle.to_radians();
+                        let cos = rad.cos();
+                        let sin = rad.sin();
+                        (
+                            sx * cos - sy * sin,
+                            sx * sin + sy * cos,
+                            ex * cos - ey * sin,
+                            ex * sin + ey * cos,
+                        )
+                    } else {
+                        (sx, sy, ex, ey)
+                    };
+
+                    let start = Point2::new(sx + center.x, sy + center.y);
+                    let end = Point2::new(ex + center.x, ey + center.y);
+                    triangles.extend(tessellate_thick_line(start, end, width));
+                }
+                MacroContent::CenterLine(cl) => {
+                    let exposure = eval_macro_bool(&cl.exposure, &vars);
+                    if exposure.is_none() || exposure == Some(false) {
+                        continue;
+                    }
+                    let w = eval_decimal(&cl.dimensions.0, &vars) * self.scale_mm;
+                    let h = eval_decimal(&cl.dimensions.1, &vars) * self.scale_mm;
+                    let cx_val = eval_decimal(&cl.center.0, &vars) * self.scale_mm + center.x;
+                    let cy_val = eval_decimal(&cl.center.1, &vars) * self.scale_mm + center.y;
+                    triangles
+                        .extend(tessellate_aperture_rect(Point2::new(cx_val, cy_val), w, h));
+                }
+                MacroContent::Outline(ol) => {
+                    let exposure = eval_macro_bool(&ol.exposure, &vars);
+                    if exposure.is_none() || exposure == Some(false) {
+                        continue;
+                    }
+                    let pts: Vec<Point2<f64>> = ol
+                        .points
+                        .iter()
+                        .map(|(mx, my)| {
+                            let x = eval_decimal(mx, &vars) * self.scale_mm + center.x;
+                            let y = eval_decimal(my, &vars) * self.scale_mm + center.y;
+                            Point2::new(x, y)
+                        })
+                        .collect();
+                    if pts.len() >= 3 {
+                        triangles.extend(tessellate_polygon(&pts));
+                    }
+                }
+                MacroContent::Polygon(pol) => {
+                    let exposure = eval_macro_bool(&pol.exposure, &vars);
+                    if exposure.is_none() || exposure == Some(false) {
+                        continue;
+                    }
+                    let diameter = eval_decimal(&pol.diameter, &vars) * self.scale_mm;
+                    let vertices = eval_macro_int(&pol.vertices, &vars);
+                    let rotation = eval_decimal(&pol.angle, &vars);
+                    let cx_val = eval_decimal(&pol.center.0, &vars) * self.scale_mm + center.x;
+                    let cy_val = eval_decimal(&pol.center.1, &vars) * self.scale_mm + center.y;
+                    triangles.extend(tessellate_aperture_polygon(
+                        Point2::new(cx_val, cy_val),
+                        diameter,
+                        vertices,
+                        rotation,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        triangles
+    }
+
+    fn emit_thick_line(&mut self, start: Point2<f64>, end: Point2<f64>) {
+        let width = self.current_aperture_width();
+        if width > 0.0 {
+            self.triangles
+                .extend(tessellate_thick_line(start, end, width));
+        }
+    }
+
+    fn emit_thick_polyline(&mut self, pts: &[Point2<f64>]) {
+        if pts.len() < 2 {
+            return;
+        }
+        let width = self.current_aperture_width();
+        if width <= 0.0 {
+            return;
+        }
+        for i in 0..(pts.len() - 1) {
+            self.triangles
+                .extend(tessellate_thick_line(pts[i], pts[i + 1], width));
+        }
+    }
+
+    fn current_aperture_width(&self) -> f64 {
+        self.current_aperture
+            .and_then(|code| {
+                self.apertures.get(&code).map(|ap| match ap {
+                    Aperture::Circle(c) => c.diameter * self.scale_mm,
+                    Aperture::Rectangle(r) => r.x.min(r.y) * self.scale_mm,
+                    Aperture::Obround(r) => r.x.min(r.y) * self.scale_mm,
+                    Aperture::Polygon(p) => p.diameter * self.scale_mm,
+                    Aperture::Macro(_, _) => 0.15,
+                })
+            })
+            .unwrap_or(0.15)
+    }
+}
+
+fn eval_decimal(dec: &MacroDecimal, vars: &[f64]) -> f64 {
+    match dec {
+        MacroDecimal::Value(v) => *v,
+        MacroDecimal::Variable(idx) => {
+            let i = *idx as usize;
+            if i >= 1 && i.saturating_sub(1) < vars.len() {
+                vars[i.saturating_sub(1)]
+            } else {
+                0.0
+            }
+        }
+        MacroDecimal::Expression(s) => eval_expression_str(s, vars),
+    }
+}
+
+fn eval_macro_bool(b: &MacroBoolean, vars: &[f64]) -> Option<bool> {
+    match b {
+        MacroBoolean::Value(v) => Some(*v),
+        MacroBoolean::Variable(idx) => {
+            let i = *idx as usize;
+            if i >= 1 && i.saturating_sub(1) < vars.len() {
+                Some(vars[i.saturating_sub(1)] != 0.0)
+            } else {
+                None
+            }
+        }
+        MacroBoolean::Expression(s) => {
+            let v = eval_expression_str(s, vars);
+            Some(v != 0.0)
+        }
+    }
+}
+
+fn eval_macro_int(val: &MacroInteger, vars: &[f64]) -> u32 {
+    match val {
+        MacroInteger::Value(v) => *v,
+        MacroInteger::Variable(idx) => {
+            let i = *idx as usize;
+            if i >= 1 && i.saturating_sub(1) < vars.len() {
+                vars[i.saturating_sub(1)] as u32
+            } else {
+                0
+            }
+        }
+        MacroInteger::Expression(s) => eval_expression_str(s, vars) as u32,
+    }
+}
+
+pub fn parse_to_shapes(source: &str) -> Result<Vec<Triangle>, ConversionError> {
+    use std::io::{BufReader, Cursor};
+
+    let cursor = Cursor::new(source);
+    let reader = BufReader::new(cursor);
+
+    let doc = match gerber_parser::parse(reader) {
+        Ok(doc) => doc,
+        Err((doc, _err)) => doc,
+    };
+
+    let commands = doc.into_commands();
+    let mut state = GerberState::new();
+    state.process_commands(&commands);
+    Ok(state.triangles)
+}
+
+pub fn render_triangles_to_png(
+    triangles: &[Triangle],
+    output_path: &Path,
+    settings: &ConversionSettings,
+) -> Result<PngRenderResult, ConversionError> {
+    if triangles.is_empty() {
+        return Err(ConversionError::NoRenderableGerber);
+    }
+
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for tri in triangles {
+        for p in [&tri.v0, &tri.v1, &tri.v2] {
+            if p.x < min_x {
+                min_x = p.x;
+            }
+            if p.y < min_y {
+                min_y = p.y;
+            }
+            if p.x > max_x {
+                max_x = p.x;
+            }
+            if p.y > max_y {
+                max_y = p.y;
+            }
+        }
+    }
+
+    let margin_mm = 0.82f64;
+    let ppm = settings.pixels_per_mm as f64;
+
+    let board_w = max_x - min_x;
+    let board_h = max_y - min_y;
+
+    let width = ((board_w + margin_mm * 2.0) * ppm).round() as u32;
+    let height = ((board_h + margin_mm * 2.0) * ppm).round() as u32;
+    let width = width.max(1);
+    let height = height.max(1);
+
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > settings.max_render_pixels {
+        return Err(ConversionError::RenderTooLarge {
+            width,
+            height,
+            pixels,
+            max_pixels: settings.max_render_pixels,
+        });
+    }
+
+    let offset = Vector2::new(-min_x + margin_mm, -min_y + margin_mm);
+
+    let mut image = GrayImage::from_pixel(width, height, Luma([0]));
+    rasterize_triangles(&mut image, triangles, width, height, ppm, offset, 255);
+
+    let dark_pixels = image.pixels().filter(|p| p[0] < settings.threshold).count();
+    image.save(output_path)?;
+
+    Ok(PngRenderResult {
+        path: output_path.to_path_buf(),
+        width,
+        height,
+        dark_pixels,
+    })
 }
