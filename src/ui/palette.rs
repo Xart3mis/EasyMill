@@ -50,3 +50,55 @@ pub fn signal_gold() -> Color {
 pub fn signal_gold_muted() -> Color {
     Color::from_rgba(0.88, 0.69, 0.41, 0.15)
 }
+
+pub fn sidebar_bg() -> Color {
+    Color::from_rgb(0.094, 0.106, 0.172)
+}
+
+pub fn sidebar_border() -> Color {
+    Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+}
+
+pub fn card_bg() -> Color {
+    Color::from_rgba(1.0, 1.0, 1.0, 0.03)
+}
+
+pub fn card_active_bg() -> Color {
+    Color::from_rgba(0.49, 0.81, 1.0, 0.06)
+}
+
+pub fn card_complete_bg() -> Color {
+    Color::from_rgba(0.62, 0.81, 0.42, 0.08)
+}
+
+pub fn card_stale_bg() -> Color {
+    Color::from_rgba(0.88, 0.69, 0.41, 0.08)
+}
+
+pub fn input_bg() -> Color {
+    Color::from_rgba(1.0, 1.0, 1.0, 0.06)
+}
+
+pub fn drop_zone_bg() -> Color {
+    Color::from_rgba(1.0, 1.0, 1.0, 0.02)
+}
+
+pub fn drop_zone_border() -> Color {
+    Color::from_rgba(1.0, 1.0, 1.0, 0.10)
+}
+
+pub fn drop_zone_active_bg() -> Color {
+    Color::from_rgba(0.49, 0.81, 1.0, 0.08)
+}
+
+pub fn layer_copper() -> Color {
+    Color::from_rgb(0.88, 0.69, 0.41)
+}
+
+pub fn layer_outline() -> Color {
+    accent()
+}
+
+pub fn layer_drill() -> Color {
+    Color::from_rgb(1.0, 0.5, 0.5)
+}
