@@ -1,6 +1,7 @@
 pub mod components;
 pub mod sidebar;
 pub mod steps;
+pub use sidebar::sidebar;
 
 use iced::{
     Alignment, Color, Element, Length, Theme,
