@@ -1,10 +1,64 @@
+pub mod components;
+pub mod sidebar;
+pub mod steps;
+
 use iced::{
-    Alignment, Color, Element, Length,
+    Alignment, Color, Element, Length, Theme,
     widget::{button, column, container, progress_bar, row, scrollable, text, text_input, image},
 };
 use super::palette;
 use super::styles;
 use easymill::conversion::PngRenderResult;
+
+pub fn tab_bar<'a>(active: crate::Tab) -> Element<'a, crate::Message> {
+    let tab_btn = |tab: crate::Tab, label: &'static str| {
+        let is_active = tab == active;
+        button(text(label).font(palette::MONO).size(13))
+            .style(move |_: &Theme, status| button::Style {
+                background: if is_active {
+                    Some(iced::Background::Color(palette::accent_muted()))
+                } else if matches!(status, button::Status::Hovered) {
+                    Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.04)))
+                } else {
+                    None
+                },
+                text_color: if is_active {
+                    palette::accent()
+                } else if matches!(status, button::Status::Hovered) {
+                    palette::text_secondary()
+                } else {
+                    palette::text_muted()
+                },
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 0.0,
+                    color: Color::TRANSPARENT,
+                },
+                ..Default::default()
+            })
+            .width(Length::FillPortion(1))
+            .padding([10, 16])
+            .on_press(crate::Message::TabChanged(tab))
+    };
+
+    container(
+        row![
+            tab_btn(crate::Tab::Source, "SOURCE"),
+            tab_btn(crate::Tab::Settings, "SETTINGS"),
+            tab_btn(crate::Tab::Pipeline, "PIPELINE"),
+        ]
+        .spacing(4)
+        .padding([4, 4])
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .style(|_| {
+        container::Style::default()
+            .background(iced::Background::Color(Color::from_rgb(0.14, 0.16, 0.24)))
+            .border(iced::border::rounded(12.0).color(Color::from_rgba(1.0, 1.0, 1.0, 0.06)).width(1.0))
+    })
+    .into()
+}
 
 pub fn header<'a>() -> Element<'a, crate::Message> {
     container(
@@ -291,10 +345,10 @@ pub fn source_panel<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messag
                 .color(palette::text_secondary()),
             selected_items,
         ]
-        .spacing(12),
+        .spacing(16),
     )
     .width(Length::Fill)
-    .padding(18)
+    .padding(24)
     .style(styles::panel_style())
     .into()
 }
@@ -311,22 +365,34 @@ pub fn config_panel<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messag
                 .size(15)
                 .color(palette::text_secondary()),
             column![
-                setting_field("Resolution (DPI)", &state.dpi_input, crate::Message::DpiChanged),
-                setting_field("Safe Z (mm)", &state.safe_z_mm_input, crate::Message::SafeZChanged),
-                setting_field("Cut Z (mm)", &state.cut_z_mm_input, crate::Message::CutZChanged),
-                setting_field("Feed rate (mm/min)", &state.feed_rate_input, crate::Message::FeedRateChanged),
-                setting_field("Plunge (mm/min)", &state.plunge_rate_input, crate::Message::PlungeRateChanged),
-                setting_field("Spindle (RPM)", &state.spindle_speed_input, crate::Message::SpindleSpeedChanged),
-                setting_field("Tool dia. (mm)", &state.tool_diameter_mm_input, crate::Message::ToolDiameterChanged),
-                setting_field("Offsets (0=fill)", &state.offset_number_input, crate::Message::OffsetNumberChanged),
+                row![
+                    setting_field("Resolution (DPI)", &state.dpi_input, crate::Message::DpiChanged),
+                    setting_field("Safe Z (mm)", &state.safe_z_mm_input, crate::Message::SafeZChanged),
+                ]
+                .spacing(20),
+                row![
+                    setting_field("Cut Z (mm)", &state.cut_z_mm_input, crate::Message::CutZChanged),
+                    setting_field("Feed rate (mm/min)", &state.feed_rate_input, crate::Message::FeedRateChanged),
+                ]
+                .spacing(20),
+                row![
+                    setting_field("Plunge (mm/min)", &state.plunge_rate_input, crate::Message::PlungeRateChanged),
+                    setting_field("Spindle (RPM)", &state.spindle_speed_input, crate::Message::SpindleSpeedChanged),
+                ]
+                .spacing(20),
+                row![
+                    setting_field("Tool dia. (mm)", &state.tool_diameter_mm_input, crate::Message::ToolDiameterChanged),
+                    setting_field("Offsets (0=fill)", &state.offset_number_input, crate::Message::OffsetNumberChanged),
+                ]
+                .spacing(20),
                 setting_field("Stepover", &state.offset_stepover_input, crate::Message::OffsetStepoverChanged),
             ]
-            .spacing(10)
+            .spacing(14)
         ]
-        .spacing(12),
+        .spacing(16),
     )
     .width(Length::Fill)
-    .padding(18)
+    .padding(24)
     .style(styles::panel_style())
     .into()
 }
@@ -363,53 +429,12 @@ pub fn pipeline_panel<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
         generate_btn
     };
 
-    scrollable(
-        container(
-            column![
-                row![
-                    text("PIPELINE")
-                        .font(palette::MONO)
-                        .size(13)
-                        .color(palette::text_accent()),
-                    container("").width(Length::Fill),
-                    progress_chip(state),
-                ]
-                .width(Length::Fill)
-                .align_y(Alignment::Center),
-                text("Stage 1: Rasterization")
-                    .font(palette::MONO)
-                    .size(12)
-                    .color(palette::text_secondary()),
-                step_card("STAGE 01", "GERBER -> PNG", "Rasterization", state.gerber_to_png, state.gerber_to_png_progress),
-                convert_btn,
-                text("Stage 2: Toolpath generation")
-                    .font(palette::MONO)
-                    .size(12)
-                    .color(palette::text_secondary()),
-                step_card("STAGE 02", "PNG -> GCODE", "Toolpath generation", state.png_to_gcode, state.png_to_gcode_progress),
-                generate_btn,
-                generated_output(state),
-                save_png_buttons(state),
-                save_gcode_button(state),
-            ]
-            .spacing(12),
-        )
-        .width(Length::Fill)
-        .padding(20)
-        .style(styles::panel_style()),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
-}
-
-pub fn stats_panel<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    container(
+    let stats_card = container(
         column![
             text("JOB STATISTICS")
                 .font(palette::MONO)
-                .size(13)
-                .color(palette::text_accent()),
+                .size(11)
+                .color(palette::text_muted()),
             column![
                 row![
                     text("Est. Cut Time:")
@@ -445,13 +470,52 @@ pub fn stats_panel<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message
                         .color(palette::text_primary()),
                 ],
             ]
-            .spacing(10)
+            .spacing(8),
         ]
-        .spacing(12),
+        .spacing(10),
     )
     .width(Length::Fill)
-    .padding(18)
-    .style(styles::panel_style())
+    .padding(14)
+    .style(styles::inset_style());
+
+    scrollable(
+        container(
+            column![
+                row![
+                    text("PIPELINE")
+                        .font(palette::MONO)
+                        .size(13)
+                        .color(palette::text_accent()),
+                    container("").width(Length::Fill),
+                    progress_chip(state),
+                ]
+                .width(Length::Fill)
+                .align_y(Alignment::Center),
+                text("Stage 1: Rasterization")
+                    .font(palette::MONO)
+                    .size(12)
+                    .color(palette::text_secondary()),
+                step_card("STAGE 01", "GERBER -> PNG", "Rasterization", state.gerber_to_png, state.gerber_to_png_progress),
+                convert_btn,
+                text("Stage 2: Toolpath generation")
+                    .font(palette::MONO)
+                    .size(12)
+                    .color(palette::text_secondary()),
+                step_card("STAGE 02", "PNG -> GCODE", "Toolpath generation", state.png_to_gcode, state.png_to_gcode_progress),
+                generate_btn,
+                generated_output(state),
+                save_png_buttons(state),
+                save_gcode_button(state),
+                stats_card,
+            ]
+            .spacing(14),
+        )
+        .width(Length::Fill)
+        .padding(24)
+        .style(styles::panel_style()),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
     .into()
 }
 
