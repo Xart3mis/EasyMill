@@ -37,6 +37,14 @@ pub enum LayerType {
 }
 
 #[derive(Debug, Clone)]
+pub struct TaggedTriangle {
+    pub triangle: Triangle,
+    pub layer: LayerType,
+}
+
+pub type BoundingBox = (f64, f64, f64, f64);
+
+#[derive(Debug, Clone)]
 enum MacroToken {
     Value(f64),
     Variable(u32),
@@ -941,25 +949,70 @@ impl GerberState {
                     }
                     let w = eval_decimal(&cl.dimensions.0, &vars) * self.scale_mm;
                     let h = eval_decimal(&cl.dimensions.1, &vars) * self.scale_mm;
-                    let cx_val = eval_decimal(&cl.center.0, &vars) * self.scale_mm + center.x;
-                    let cy_val = eval_decimal(&cl.center.1, &vars) * self.scale_mm + center.y;
-                    triangles
-                        .extend(tessellate_aperture_rect(Point2::new(cx_val, cy_val), w, h));
+                    let cx = eval_decimal(&cl.center.0, &vars) * self.scale_mm;
+                    let cy = eval_decimal(&cl.center.1, &vars) * self.scale_mm;
+                    let angle = eval_decimal(&cl.angle, &vars);
+                    if angle.abs() > 1e-10 {
+                        let rad = angle.to_radians();
+                        let cos = rad.cos();
+                        let sin = rad.sin();
+                        let hw = w / 2.0;
+                        let hh = h / 2.0;
+                        let corners = [
+                            (cx - hw, cy - hh),
+                            (cx + hw, cy - hh),
+                            (cx + hw, cy + hh),
+                            (cx - hw, cy + hh),
+                        ];
+                        let pts: Vec<Point2<f64>> = corners
+                            .iter()
+                            .map(|(px, py)| {
+                                Point2::new(
+                                    px * cos - py * sin + center.x,
+                                    px * sin + py * cos + center.y,
+                                )
+                            })
+                            .collect();
+                        triangles.extend(tessellate_polygon(&pts));
+                    } else {
+                        triangles.extend(tessellate_aperture_rect(
+                            Point2::new(cx + center.x, cy + center.y),
+                            w,
+                            h,
+                        ));
+                    }
                 }
                 MacroContent::Outline(ol) => {
                     let exposure = eval_macro_bool(&ol.exposure, &vars);
                     if exposure.is_none() || exposure == Some(false) {
                         continue;
                     }
-                    let pts: Vec<Point2<f64>> = ol
-                        .points
-                        .iter()
-                        .map(|(mx, my)| {
-                            let x = eval_decimal(mx, &vars) * self.scale_mm + center.x;
-                            let y = eval_decimal(my, &vars) * self.scale_mm + center.y;
-                            Point2::new(x, y)
-                        })
-                        .collect();
+                    let angle = eval_decimal(&ol.angle, &vars);
+                    let pts: Vec<Point2<f64>> = if angle.abs() > 1e-10 {
+                        let rad = angle.to_radians();
+                        let cos = rad.cos();
+                        let sin = rad.sin();
+                        ol.points
+                            .iter()
+                            .map(|(mx, my)| {
+                                let x = eval_decimal(mx, &vars) * self.scale_mm;
+                                let y = eval_decimal(my, &vars) * self.scale_mm;
+                                Point2::new(
+                                    x * cos - y * sin + center.x,
+                                    x * sin + y * cos + center.y,
+                                )
+                            })
+                            .collect()
+                    } else {
+                        ol.points
+                            .iter()
+                            .map(|(mx, my)| {
+                                let x = eval_decimal(mx, &vars) * self.scale_mm + center.x;
+                                let y = eval_decimal(my, &vars) * self.scale_mm + center.y;
+                                Point2::new(x, y)
+                            })
+                            .collect()
+                    };
                     if pts.len() >= 3 {
                         triangles.extend(tessellate_polygon(&pts));
                     }
@@ -1090,6 +1143,113 @@ pub fn parse_to_shapes(source: &str) -> Result<Vec<Triangle>, ConversionError> {
     Ok(state.triangles)
 }
 
+pub fn compute_bounding_box(triangles: &[Triangle]) -> BoundingBox {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for tri in triangles {
+        for p in [&tri.v0, &tri.v1, &tri.v2] {
+            if p.x < min_x { min_x = p.x; }
+            if p.y < min_y { min_y = p.y; }
+            if p.x > max_x { max_x = p.x; }
+            if p.y > max_y { max_y = p.y; }
+        }
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
+pub struct RenderLayout {
+    pub width: u32,
+    pub height: u32,
+    pub ppm: f64,
+    pub offset: Vector2<f64>,
+}
+
+pub fn compute_render_layout(
+    bbox: BoundingBox,
+    settings: &ConversionSettings,
+) -> Result<RenderLayout, ConversionError> {
+    let margin_mm = 0.82f64;
+    let ppm = settings.pixels_per_mm as f64;
+    let (min_x, min_y, max_x, max_y) = bbox;
+    let board_w = max_x - min_x;
+    let board_h = max_y - min_y;
+    let width = ((board_w + margin_mm * 2.0) * ppm).round() as u32;
+    let height = ((board_h + margin_mm * 2.0) * ppm).round() as u32;
+    let width = width.max(1);
+    let height = height.max(1);
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > settings.max_render_pixels {
+        return Err(ConversionError::RenderTooLarge {
+            width, height, pixels,
+            max_pixels: settings.max_render_pixels,
+        });
+    }
+    let offset = Vector2::new(-min_x + margin_mm, -min_y + margin_mm);
+    Ok(RenderLayout { width, height, ppm, offset })
+}
+
+pub fn render_triangles_to_image(
+    image: &mut GrayImage,
+    triangles: &[Triangle],
+    layout: &RenderLayout,
+    fill_color: u8,
+) {
+    rasterize_triangles(
+        image, triangles, layout.width, layout.height,
+        layout.ppm, layout.offset, fill_color,
+    );
+}
+
+pub fn invert_image_gray(image: &mut GrayImage) {
+    for pixel in image.pixels_mut() {
+        pixel[0] = 255 - pixel[0];
+    }
+}
+
+pub fn flood_fill_holes(image: &GrayImage) -> GrayImage {
+    let (w, h) = image.dimensions();
+    let mut visited = vec![false; (w * h) as usize];
+    let mut stack = Vec::new();
+
+    for x in 0..w {
+        if image.get_pixel(x, 0)[0] < 128 { stack.push((x, 0)); }
+        if image.get_pixel(x, h - 1)[0] < 128 { stack.push((x, h - 1)); }
+    }
+    for y in 0..h {
+        if image.get_pixel(0, y)[0] < 128 { stack.push((0, y)); }
+        if image.get_pixel(w - 1, y)[0] < 128 { stack.push((w - 1, y)); }
+    }
+
+    while let Some((cx, cy)) = stack.pop() {
+        let idx = (cy * w + cx) as usize;
+        if visited[idx] { continue; }
+        visited[idx] = true;
+        for (dx, dy) in &[(-1i32,0i32),(1,0),(0,-1),(0,1)] {
+            let nx = cx as i32 + dx;
+            let ny = cy as i32 + dy;
+            if nx >= 0 && nx < w as i32 && ny >= 0 && ny < h as i32 {
+                let nidx = (ny as u32 * w + nx as u32) as usize;
+                if !visited[nidx] && image.get_pixel(nx as u32, ny as u32)[0] < 128 {
+                    stack.push((nx as u32, ny as u32));
+                }
+            }
+        }
+    }
+
+    let mut out = image.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            if !visited[idx] {
+                out.put_pixel(x, y, Luma([255]));
+            }
+        }
+    }
+    out
+}
+
 pub fn render_triangles_to_png(
     triangles: &[Triangle],
     output_path: &Path,
@@ -1098,61 +1258,16 @@ pub fn render_triangles_to_png(
     if triangles.is_empty() {
         return Err(ConversionError::NoRenderableGerber);
     }
-
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
-    for tri in triangles {
-        for p in [&tri.v0, &tri.v1, &tri.v2] {
-            if p.x < min_x {
-                min_x = p.x;
-            }
-            if p.y < min_y {
-                min_y = p.y;
-            }
-            if p.x > max_x {
-                max_x = p.x;
-            }
-            if p.y > max_y {
-                max_y = p.y;
-            }
-        }
-    }
-
-    let margin_mm = 0.82f64;
-    let ppm = settings.pixels_per_mm as f64;
-
-    let board_w = max_x - min_x;
-    let board_h = max_y - min_y;
-
-    let width = ((board_w + margin_mm * 2.0) * ppm).round() as u32;
-    let height = ((board_h + margin_mm * 2.0) * ppm).round() as u32;
-    let width = width.max(1);
-    let height = height.max(1);
-
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels > settings.max_render_pixels {
-        return Err(ConversionError::RenderTooLarge {
-            width,
-            height,
-            pixels,
-            max_pixels: settings.max_render_pixels,
-        });
-    }
-
-    let offset = Vector2::new(-min_x + margin_mm, -min_y + margin_mm);
-
-    let mut image = GrayImage::from_pixel(width, height, Luma([0]));
-    rasterize_triangles(&mut image, triangles, width, height, ppm, offset, 255);
-
+    let bbox = compute_bounding_box(triangles);
+    let layout = compute_render_layout(bbox, settings)?;
+    let mut image = GrayImage::from_pixel(layout.width, layout.height, Luma([0]));
+    render_triangles_to_image(&mut image, triangles, &layout, 255);
     let dark_pixels = image.pixels().filter(|p| p[0] < settings.threshold).count();
     image.save(output_path)?;
-
     Ok(PngRenderResult {
         path: output_path.to_path_buf(),
-        width,
-        height,
+        width: layout.width,
+        height: layout.height,
         dark_pixels,
     })
 }
@@ -1287,11 +1402,159 @@ mod tests {
     }
 
     #[test]
+    fn centerline_macro_rotation_applied() {
+        // 2x1mm rectangle centered at (0,0) rotated 90° via aperture macro
+        // Unrotated bounding box: x in [-1, 1], y in [-0.5, 0.5]
+        // Rotated 90° around origin: x in [-0.5, 0.5], y in [-1, 1]
+        // Flashed at (5,5): x in [4.5, 5.5], y in [4, 6]
+        let gerber = [
+            "%FSLAX24Y24*%",
+            "%MOMM*%",
+            "%AMRECT*",
+            "21,1,2,1,0,0,90*",
+            "%",
+            "%ADD10RECT*%",
+            "D10*",
+            "X050000Y050000D03*",
+            "M02*",
+        ].join("\n");
+        let tris = parse_to_shapes(&gerber).unwrap();
+        assert!(!tris.is_empty(), "expected triangles from rotated CenterLine macro");
+        let min_x = tris.iter().map(|t| t.v0.x.min(t.v1.x).min(t.v2.x)).reduce(f64::min).unwrap();
+        let max_x = tris.iter().map(|t| t.v0.x.max(t.v1.x).max(t.v2.x)).reduce(f64::max).unwrap();
+        let min_y = tris.iter().map(|t| t.v0.y.min(t.v1.y).min(t.v2.y)).reduce(f64::min).unwrap();
+        let max_y = tris.iter().map(|t| t.v0.y.max(t.v1.y).max(t.v2.y)).reduce(f64::max).unwrap();
+        // Rotated 90°: width should be ~1 (original height), height ~2 (original width)
+        let w = max_x - min_x;
+        let h = max_y - min_y;
+        assert!(w < 1.5, "rotated width should be ~1, got {w}");
+        assert!(h > 1.5, "rotated height should be ~2, got {h}");
+    }
+
+    #[test]
+    fn centerline_macro_rotation_zero() {
+        // Without rotation the original orientation is preserved
+        let gerber = [
+            "%FSLAX24Y24*%",
+            "%MOMM*%",
+            "%AMRECT*",
+            "21,1,2,1,0,0,0*",
+            "%",
+            "%ADD10RECT*%",
+            "D10*",
+            "X050000Y050000D03*",
+            "M02*",
+        ].join("\n");
+        let tris = parse_to_shapes(&gerber).unwrap();
+        assert!(!tris.is_empty());
+        let max_x = tris.iter().flat_map(|t| [t.v0.x, t.v1.x, t.v2.x]).reduce(f64::max).unwrap();
+        let min_x = tris.iter().flat_map(|t| [t.v0.x, t.v1.x, t.v2.x]).reduce(f64::min).unwrap();
+        let max_y = tris.iter().flat_map(|t| [t.v0.y, t.v1.y, t.v2.y]).reduce(f64::max).unwrap();
+        let min_y = tris.iter().flat_map(|t| [t.v0.y, t.v1.y, t.v2.y]).reduce(f64::min).unwrap();
+        // Unrotated: width = 2, height = 1
+        assert!((max_x - min_x) - 2.0 < 0.01);
+        assert!((max_y - min_y) - 1.0 < 0.01);
+    }
+
+    #[test]
+    fn outline_rotation_swaps_bounds() {
+        // 2x1mm rectangle outline, originally width=2 height=1
+        // Rotated 90° around macro origin: width becomes 1, height becomes 2
+        // Flashed at (5, 5)
+        let gerber = [
+            "%FSLAX24Y24*%",
+            "%MOMM*%",
+            "%AMBAR*",
+            "4,1,4,0,0,2,0,2,1,0,1,0,0,90*",
+            "%",
+            "%ADD10BAR*%",
+            "D10*",
+            "X050000Y050000D03*",
+            "M02*",
+        ].join("\n");
+        let tris = parse_to_shapes(&gerber).unwrap();
+        assert!(!tris.is_empty());
+        let all_x: Vec<f64> = tris.iter().flat_map(|t| [t.v0.x, t.v1.x, t.v2.x]).collect();
+        let all_y: Vec<f64> = tris.iter().flat_map(|t| [t.v0.y, t.v1.y, t.v2.y]).collect();
+        let min_x = all_x.iter().cloned().reduce(f64::min).unwrap();
+        let max_x = all_x.iter().cloned().reduce(f64::max).unwrap();
+        let min_y = all_y.iter().cloned().reduce(f64::min).unwrap();
+        let max_y = all_y.iter().cloned().reduce(f64::max).unwrap();
+        let w = max_x - min_x;
+        let h = max_y - min_y;
+        // After 90° rotation: w ≈ 1, h ≈ 2
+        assert!(w < 1.5, "rotated outline width ~1, got {w}");
+        assert!(h > 1.5, "rotated outline height ~2, got {h}");
+    }
+
+    #[test]
+    fn outline_macro_basic_parses() {
+        // Outline macro — 4-vertex rectangle, closed (last=first)
+        // Data: 4,exposure,4, x1,y1, x2,y2, x3,y3, x4,y4, x5=x1,y5=y1, angle
+        // gerber_parser reads num_vertices+1 points (uses <=), so 4+1=5 points
+        let gerber = [
+            "%FSLAX24Y24*%",
+            "%MOMM*%",
+            "%AMBOX*",
+            "4,1,4,0,0,10,0,10,10,0,10,0,0,0*",
+            "%",
+            "%ADD10BOX*%",
+            "D10*",
+            "X050000Y050000D03*",
+            "M02*",
+        ].join("\n");
+        let tris = parse_to_shapes(&gerber).unwrap();
+        assert!(!tris.is_empty(), "expected triangles from Outline macro");
+    }
+
+    #[test]
     fn render_empty_triangles_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let png_path = dir.path().join("empty.png");
         let settings = ConversionSettings::default();
         let result = render_triangles_to_png(&[], &png_path, &settings);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compute_bounding_box_returns_correct_extents() {
+        let tris = vec![
+            Triangle { v0: Point2::new(0.0, 0.0), v1: Point2::new(10.0, 0.0), v2: Point2::new(10.0, 10.0) },
+        ];
+        let bbox = compute_bounding_box(&tris);
+        assert_eq!(bbox, (0.0, 0.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn invert_image_gray_flips_pixels() {
+        let mut img = GrayImage::from_pixel(2, 1, Luma([0]));
+        img.put_pixel(1, 0, Luma([255]));
+        invert_image_gray(&mut img);
+        assert_eq!(img.get_pixel(0, 0)[0], 255);
+        assert_eq!(img.get_pixel(1, 0)[0], 0);
+    }
+
+    #[test]
+    fn flood_fill_holes_fills_enclosed_region() {
+        let mut img = GrayImage::from_pixel(5, 5, Luma([0]));
+        for x in 1..4 { img.put_pixel(x, 1, Luma([255])); }
+        for x in 1..4 { img.put_pixel(x, 3, Luma([255])); }
+        img.put_pixel(1, 2, Luma([255]));
+        img.put_pixel(3, 2, Luma([255]));
+        let filled = flood_fill_holes(&img);
+        assert_eq!(filled.get_pixel(2, 2)[0], 255, "enclosed black pixel should become white");
+        assert_eq!(filled.get_pixel(0, 0)[0], 0, "border-connected black should stay black");
+    }
+
+    #[test]
+    fn compute_render_layout_rejects_oversized() {
+        let bbox = (0.0, 0.0, 1000.0, 1000.0);
+        let settings = ConversionSettings {
+            pixels_per_mm: 100.0,
+            max_render_pixels: 10_000,
+            ..ConversionSettings::default()
+        };
+        let result = compute_render_layout(bbox, &settings);
         assert!(result.is_err());
     }
 }
