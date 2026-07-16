@@ -1148,6 +1148,7 @@ fn parse_excellon(source: &str) -> Vec<gerber::Triangle> {
 
 
 
+#[allow(dead_code)]
 fn raster_to_gcode(image: &GrayImage, settings: ConversionSettings) -> String {
     let mut lines = vec![
         "; EasyMill raster G-code".to_owned(),

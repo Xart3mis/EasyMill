@@ -2,8 +2,6 @@ use iced::{
     Alignment, Color, Element, Length,
     widget::{button, column, container, progress_bar, row, scrollable, text, text_input, image},
 };
-use std::path::PathBuf;
-
 use super::palette;
 use super::styles;
 use easymill::conversion::PngRenderResult;
@@ -607,6 +605,4 @@ pub fn save_gcode_button<'a>(state: &'a crate::AppState) -> Element<'a, crate::M
     }
 }
 
-fn path_to_label(path: PathBuf) -> String {
-    path.to_string_lossy().into_owned()
-}
+

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::task::spawn_blocking;
 use tracing::{error, info, warn};
 
@@ -36,14 +36,6 @@ impl StepState {
         }
     }
 
-    pub(crate) fn progress(self) -> f32 {
-        match self {
-            Self::Idle => 0.0,
-            Self::Ready => 0.45,
-            Self::Running => 0.70,
-            Self::Complete => 1.0,
-        }
-    }
 }
 
 pub(crate) struct AppState {
@@ -650,10 +642,4 @@ fn path_to_label(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn temporary_png_path() -> PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("easymill-{timestamp}.png"))
-}
+
