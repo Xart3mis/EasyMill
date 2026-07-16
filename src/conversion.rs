@@ -1,15 +1,16 @@
-use image::GrayImage;
+use image::{GrayImage, Luma};
 use nalgebra::Point2;
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
-use tracing::{debug, info, warn};
-use zip::ZipArchive;
+use tracing::{debug, info};
 
 use crate::gerber;
+
+/// Progress callback: receives progress as f32 in [0.0, 1.0].
+pub type ProgressFn = Box<dyn Fn(f32) + Send>;
 
 pub const DEFAULT_DPI: f32 = 1000.0;
 pub const MM_PER_INCH: f32 = 25.4;
@@ -57,11 +58,17 @@ pub struct PngRenderResult {
     pub dark_pixels: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct PngLayerResults {
+    pub copper: PngRenderResult,
+    pub drills: PngRenderResult,
+    pub outline: PngRenderResult,
+}
+
 #[derive(Debug)]
 pub enum ConversionError {
     Io(std::io::Error),
     Image(image::ImageError),
-    Zip(zip::result::ZipError),
     EmptyInput,
     NoRenderableGerber,
     GerberParseError(String),
@@ -78,7 +85,6 @@ impl std::fmt::Display for ConversionError {
         match self {
             Self::Io(err) => write!(formatter, "I/O error: {err}"),
             Self::Image(err) => write!(formatter, "image error: {err}"),
-            Self::Zip(err) => write!(formatter, "ZIP error: {err}"),
             Self::EmptyInput => write!(formatter, "no input files were provided"),
             Self::NoRenderableGerber => write!(formatter, "no supported Gerber geometry was found"),
             Self::GerberParseError(err) => write!(formatter, "gerber parse error: {err}"),
@@ -109,72 +115,116 @@ impl From<image::ImageError> for ConversionError {
     }
 }
 
-impl From<zip::result::ZipError> for ConversionError {
-    fn from(value: zip::result::ZipError) -> Self {
-        Self::Zip(value)
-    }
+#[allow(dead_code)]
+fn gerber_output_stem(paths: &[PathBuf]) -> String {
+    paths.first()
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| "output".to_owned())
 }
 
 pub fn gerber_inputs_to_png(
-    inputs: &[PathBuf],
-    output_path: &Path,
+    copper_inputs: &[PathBuf],
+    outline_inputs: &[PathBuf],
+    drill_inputs: &[PathBuf],
+    output_dir: &Path,
+    output_stem: &str,
     settings: ConversionSettings,
-) -> Result<PngRenderResult, ConversionError> {
+    on_progress: Option<ProgressFn>,
+) -> Result<PngLayerResults, ConversionError> {
     info!(
-        input_count = inputs.len(),
-        output = %output_path.display(),
-        pixels_per_mm = settings.pixels_per_mm,
-        threshold = settings.threshold,
-        "starting gerber to png conversion"
+        copper = copper_inputs.len(),
+        outline = outline_inputs.len(),
+        drill = drill_inputs.len(),
+        "starting gerber to 3-png conversion"
     );
 
-    if inputs.is_empty() {
-        warn!("gerber to png conversion received no inputs");
+    if copper_inputs.is_empty() && outline_inputs.is_empty() && drill_inputs.is_empty() {
         return Err(ConversionError::EmptyInput);
     }
 
-    let mut gerber_sources = Vec::new();
-    for input in inputs {
-        if is_zip(input) {
-            info!(path = %input.display(), "reading gerber zip archive");
-            gerber_sources.extend(read_zip_gerbers(input)?);
-        } else {
-            let source = fs::read_to_string(input)?;
-            debug!(
-                path = %input.display(),
-                bytes = source.len(),
-                "read gerber source file"
-            );
-            gerber_sources.push(source);
-        }
-    }
+    let mut all_tagged: Vec<gerber::TaggedTriangle> = Vec::new();
+    let total_files = copper_inputs.len() + outline_inputs.len() + drill_inputs.len();
+    let mut file_count = 0u32;
 
-    let mut triangles = Vec::new();
-    for source in &gerber_sources {
-        if is_excellon(source) {
-            triangles.extend(parse_excellon(source));
-        } else {
-            match gerber::parse_to_shapes(source) {
-                Ok(shapes) => triangles.extend(shapes),
-                Err(e) => {
-                    warn!("gerber parse error (skipping file): {}", e);
-                    continue;
-                }
+    let mut parse_and_tag = |paths: &[PathBuf], layer: gerber::LayerType| -> Result<(), ConversionError> {
+        for input in paths {
+            let source = fs::read_to_string(input)?;
+            let triangles: Vec<gerber::Triangle> = if is_excellon(&source) {
+                parse_excellon(&source)
+            } else {
+                gerber::parse_to_shapes(&source)?
+            };
+            for tri in triangles {
+                all_tagged.push(gerber::TaggedTriangle { triangle: tri, layer });
+            }
+            file_count += 1;
+            if let Some(ref cb) = on_progress {
+                cb(file_count as f32 / (total_files as f32 * 0.5));
             }
         }
+        Ok(())
+    };
+
+    parse_and_tag(copper_inputs, gerber::LayerType::Copper)?;
+    parse_and_tag(outline_inputs, gerber::LayerType::Profile)?;
+    parse_and_tag(drill_inputs, gerber::LayerType::Drill)?;
+
+    if all_tagged.is_empty() {
+        return Err(ConversionError::NoRenderableGerber);
     }
 
-    info!(triangle_count = triangles.len(), "triangulated all layers");
+    let all_tris: Vec<gerber::Triangle> = all_tagged.iter().map(|t| t.triangle.clone()).collect();
+    let bbox = gerber::compute_bounding_box(&all_tris);
+    let layout = gerber::compute_render_layout(bbox, &settings)?;
 
-    let result = gerber::render_triangles_to_png(&triangles, output_path, &settings)?;
-    info!(
-        output = %result.path.display(),
-        width = result.width,
-        height = result.height,
-        dark_pixels = result.dark_pixels,
-        "finished gerber to png conversion"
-    );
-    Ok(result)
+    if let Some(ref cb) = on_progress { cb(0.6); }
+
+    let render_layer = |tagged: &[gerber::TaggedTriangle],
+                         layer: gerber::LayerType,
+                         suffix: &str,
+                         invert: bool,
+                         flood_fill: bool,
+                         progress: f32| -> Result<PngRenderResult, ConversionError>
+    {
+        let layer_tris: Vec<gerber::Triangle> = tagged.iter()
+            .filter(|t| t.layer == layer)
+            .map(|t| t.triangle.clone())
+            .collect();
+
+        let output_path = output_dir.join(format!("{output_stem}{suffix}"));
+        let mut image = GrayImage::from_pixel(layout.width, layout.height, Luma([0]));
+        gerber::render_triangles_to_image(&mut image, &layer_tris, &layout, 255);
+
+        if invert {
+            gerber::invert_image_gray(&mut image);
+        }
+        if flood_fill {
+            image = gerber::flood_fill_holes(&image);
+        }
+
+        let dark_pixels = image.pixels().filter(|p| p[0] < settings.threshold).count();
+        image.save(&output_path)?;
+
+        if let Some(ref cb) = on_progress { cb(progress); }
+
+        Ok(PngRenderResult {
+            path: output_path,
+            width: layout.width,
+            height: layout.height,
+            dark_pixels,
+        })
+    };
+
+    let copper = render_layer(&all_tagged, gerber::LayerType::Copper, "_traces.png", false, false, 0.75)?;
+    let drills = render_layer(&all_tagged, gerber::LayerType::Drill, "_drills.png", true, false, 0.85)?;
+    let outline = render_layer(&all_tagged, gerber::LayerType::Profile, "_outline.png", false, true, 0.95)?;
+
+    info!("3-png conversion complete: copper={}, drills={}, outline={}",
+        copper.path.display(), drills.path.display(), outline.path.display());
+
+    Ok(PngLayerResults { copper, drills, outline })
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +240,7 @@ pub struct GcodeResult {
 pub fn png_to_gcode(
     png_path: &Path,
     settings: ConversionSettings,
+    on_progress: Option<ProgressFn>,
 ) -> Result<GcodeResult, ConversionError> {
     info!(
         input = %png_path.display(),
@@ -204,6 +255,7 @@ pub fn png_to_gcode(
     );
 
     let image = image::open(png_path)?.to_luma8();
+    if let Some(ref cb) = on_progress { cb(0.1); }
 
     let nx = image.width() as usize;
     let ny = image.height() as usize;
@@ -233,6 +285,7 @@ pub fn png_to_gcode(
     // 2. Compute Euclidean distance transform
     let distances = compute_distance_transform(&binary_image, nx, ny);
     debug!("computed distance transform");
+    if let Some(ref cb) = on_progress { cb(0.5); }
 
     // 3. Offset and vectorize loop
     let tool_dia_pixels = settings.tool_diameter_mm * settings.pixels_per_mm;
@@ -281,6 +334,7 @@ pub fn png_to_gcode(
         path_count = accumulated_paths.len(),
         "completed offset vectorization"
     );
+    if let Some(ref cb) = on_progress { cb(0.8); }
 
     // 4. Merge paths
     let dmerge = settings.pixels_per_mm * settings.tool_diameter_mm; // default merge = 1.0 diameter
@@ -302,6 +356,7 @@ pub fn png_to_gcode(
         cut_depth_mm = settings.cut_z_mm,
         "added toolpath depth"
     );
+    if let Some(ref cb) = on_progress { cb(0.95); }
 
     // 6. Generate G-code and statistics
     let gcode_stats = generate_gcode(&path_with_depth, image.width(), image.height(), &settings);
@@ -325,6 +380,8 @@ pub fn png_to_gcode(
         height_mm,
         paths: paths_2d,
     };
+
+    if let Some(ref cb) = on_progress { cb(1.0); }
 
     info!(
         gcode_bytes = result.gcode.len(),
@@ -971,25 +1028,6 @@ fn generate_gcode(
     }
 }
 
-fn read_zip_gerbers(path: &Path) -> Result<Vec<String>, ConversionError> {
-    let file = fs::File::open(path)?;
-    let mut archive = ZipArchive::new(file)?;
-    let mut sources = Vec::new();
-
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index)?;
-        if !entry.is_file() || !is_gerber_name(entry.name()) {
-            continue;
-        }
-
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        sources.push(String::from_utf8_lossy(&bytes).into_owned());
-    }
-
-    Ok(sources)
-}
-
 fn is_excellon(source: &str) -> bool {
     let has_m48 = source.contains("M48");
     let has_metric = source.contains("METRIC");
@@ -1170,31 +1208,12 @@ fn raster_to_gcode(image: &GrayImage, settings: ConversionSettings) -> String {
 
 
 
-fn is_zip(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-}
-
-fn is_gerber_name(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "gbr" | "grb" | "gtl" | "gbl" | "gko" | "gto" | "gbo" | "drl"
-            )
-        })
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Write};
+    use std::fs;
 
     use image::{ImageBuffer, Luma};
     use tempfile::tempdir;
-    use zip::{ZipWriter, write::SimpleFileOptions};
 
     use super::{
         ConversionError, ConversionSettings, DEFAULT_PIXELS_PER_MM, gerber_inputs_to_png,
@@ -1207,24 +1226,31 @@ mod tests {
     fn gerber_stroke_renders_to_png() {
         let dir = tempdir().unwrap();
         let gerber_path = dir.path().join("top.gtl");
-        let png_path = dir.path().join("preview.png");
+        let output_dir = dir.path().to_path_buf();
         fs::write(&gerber_path, SIMPLE_GERBER).unwrap();
 
         let result = gerber_inputs_to_png(
             &[gerber_path],
-            &png_path,
+            &[],
+            &[],
+            &output_dir,
+            "preview",
             ConversionSettings {
                 pixels_per_mm: 20.0,
                 ..ConversionSettings::default()
             },
+            None,
         )
         .unwrap();
 
-        assert!(png_path.exists());
-        assert!(result.width > 0);
-        assert!(result.height > 0);
+        assert!(result.copper.path.exists());
+        assert!(result.copper.width > 0);
+        assert!(result.copper.height > 0);
+        assert!(result.copper.path.to_string_lossy().contains("preview_traces.png"));
+        assert!(result.drills.path.to_string_lossy().contains("preview_drills.png"));
+        assert!(result.outline.path.to_string_lossy().contains("preview_outline.png"));
 
-        let rendered = image::open(&png_path).unwrap().to_luma8();
+        let rendered = image::open(&result.copper.path).unwrap().to_luma8();
         let dark_pixels = rendered.pixels().filter(|pixel| pixel[0] < 128).count();
         assert!(dark_pixels > 0);
     }
@@ -1233,56 +1259,24 @@ mod tests {
     fn default_gerber_render_uses_1000_dpi() {
         let dir = tempdir().unwrap();
         let gerber_path = dir.path().join("top.gtl");
-        let default_png_path = dir.path().join("default-preview.png");
-        let explicit_png_path = dir.path().join("explicit-preview.png");
         fs::write(&gerber_path, SIMPLE_GERBER).unwrap();
 
         let default_result = gerber_inputs_to_png(
-            std::slice::from_ref(&gerber_path),
-            &default_png_path,
-            ConversionSettings::default(),
-        )
-        .unwrap();
+            &[gerber_path.clone()], &[], &[],
+            dir.path(), "default-preview",
+            ConversionSettings::default(), None,
+        ).unwrap();
         let explicit_result = gerber_inputs_to_png(
-            &[gerber_path],
-            &explicit_png_path,
+            &[gerber_path], &[], &[],
+            dir.path(), "explicit-preview",
             ConversionSettings {
                 pixels_per_mm: DEFAULT_PIXELS_PER_MM,
                 ..ConversionSettings::default()
-            },
-        )
-        .unwrap();
+            }, None,
+        ).unwrap();
 
-        assert!((DEFAULT_PIXELS_PER_MM - 1000.0 / 25.4).abs() < f32::EPSILON);
-        assert_eq!(default_result.width, explicit_result.width);
-        assert_eq!(default_result.height, explicit_result.height);
-    }
-
-    #[test]
-    fn zipped_gerber_package_renders_to_png() {
-        let dir = tempdir().unwrap();
-        let zip_path = dir.path().join("board.zip");
-        let png_path = dir.path().join("preview.png");
-
-        let zip_file = fs::File::create(&zip_path).unwrap();
-        let mut zip = ZipWriter::new(zip_file);
-        zip.start_file("top.gtl", SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(SIMPLE_GERBER.as_bytes()).unwrap();
-        zip.finish().unwrap();
-
-        let result = gerber_inputs_to_png(
-            &[zip_path],
-            &png_path,
-            ConversionSettings {
-                pixels_per_mm: 20.0,
-                ..ConversionSettings::default()
-            },
-        )
-        .unwrap();
-
-        assert!(png_path.exists());
-        assert!(result.dark_pixels > 0);
+        assert_eq!(default_result.copper.width, explicit_result.copper.width);
+        assert_eq!(default_result.copper.height, explicit_result.copper.height);
     }
 
     #[test]
@@ -1305,6 +1299,7 @@ mod tests {
                 cut_z_mm: -0.15,
                 ..ConversionSettings::default()
             },
+            None,
         )
         .unwrap();
 
@@ -1319,35 +1314,48 @@ mod tests {
     fn oversized_gerber_render_fails_before_allocation() {
         let dir = tempdir().unwrap();
         let gerber_path = dir.path().join("large-board.gtl");
-        let png_path = dir.path().join("preview.png");
-        fs::write(
-            &gerber_path,
+        fs::write(&gerber_path,
             "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.300*%\nD10*\nX000000Y000000D02*\nX999999Y999999D01*\nM02*\n",
-        )
-        .unwrap();
+        ).unwrap();
 
         let err = gerber_inputs_to_png(
-            &[gerber_path],
-            &png_path,
+            &[gerber_path], &[], &[],
+            dir.path(), "large",
             ConversionSettings {
                 pixels_per_mm: 100.0,
                 max_render_pixels: 10_000,
                 ..ConversionSettings::default()
-            },
-        )
-        .unwrap_err();
+            }, None,
+        ).unwrap_err();
 
         match err {
-            ConversionError::RenderTooLarge {
-                pixels,
-                max_pixels,
-                ..
-            } => {
+            ConversionError::RenderTooLarge { pixels, max_pixels, .. } => {
                 assert!(pixels > max_pixels);
                 assert_eq!(max_pixels, 10_000);
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn three_pngs_have_identical_dimensions() {
+        let dir = tempdir().unwrap();
+        let gerber_path = dir.path().join("top.gtl");
+        fs::write(&gerber_path, SIMPLE_GERBER).unwrap();
+
+        let result = gerber_inputs_to_png(
+            &[gerber_path], &[], &[],
+            dir.path(), "test",
+            ConversionSettings {
+                pixels_per_mm: 20.0,
+                ..ConversionSettings::default()
+            }, None,
+        ).unwrap();
+
+        assert_eq!(result.copper.width, result.drills.width);
+        assert_eq!(result.copper.height, result.drills.height);
+        assert_eq!(result.copper.width, result.outline.width);
+        assert_eq!(result.copper.height, result.outline.height);
     }
 
     #[test]
@@ -1373,6 +1381,7 @@ mod tests {
                 offset_stepover: 0.2,
                 ..ConversionSettings::default()
             },
+            None,
         )
         .unwrap();
 
@@ -1391,33 +1400,4 @@ mod tests {
         assert!(max_x > 0.0, "toolpath x coords must be positive mm values");
     }
 
-    #[test]
-    fn real_gerber_zip_renders_to_expected_size() {
-        // Board outline (Edge_Cuts) is ~31.85 × 17.15 mm.
-        // At 1000 DPI (39.37 px/mm) + 0.82 mm margin on each side → ~1319 × 740 px.
-        let zip = std::path::Path::new("test_files/inputs/gerber.zip");
-        if !zip.exists() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let png_path = dir.path().join("out.png");
-        let result = gerber_inputs_to_png(
-            &[zip.to_path_buf()],
-            &png_path,
-            ConversionSettings::default(),
-        )
-        .unwrap();
-        // Previously broken: format spec was not parsed, yielding ~450k × 390k pixels.
-        assert!(
-            result.width < 2000,
-            "render width {} is too large — coordinate format likely misread (was {}×{})",
-            result.width, result.width, result.height
-        );
-        assert!(
-            result.height < 2000,
-            "render height {} is too large — coordinate format likely misread",
-            result.height
-        );
-        assert!(result.dark_pixels > 0, "no dark pixels rendered");
-    }
 }

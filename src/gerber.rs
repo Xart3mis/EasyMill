@@ -29,7 +29,7 @@ pub struct Shape {
     pub triangles: Vec<Triangle>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LayerType {
     Copper,
     Profile,

@@ -1,19 +1,24 @@
 use easymill::conversion::{
-    ConversionSettings, DEFAULT_DPI, MM_PER_INCH, GcodeResult, PngRenderResult,
+    ConversionSettings, DEFAULT_DPI, MM_PER_INCH, GcodeResult, PngLayerResults,
     gerber_inputs_to_png, png_to_gcode,
 };
 use easymill::logging::init_logging;
 use iced::{
-    self, Alignment, Background, Color, Element, Font, Length, Shadow, Task, Theme, Vector, border,
-    widget::{button, column, container, progress_bar, row, text, text_input, image},
+    self, Alignment, Element, Length, Subscription, Task, Theme,
+    widget::{column, container, row},
 };
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::task::spawn_blocking;
 use tracing::{error, info, warn};
 
+mod ui;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum StepState {
+pub(crate) enum StepState {
     #[default]
     Idle,
     Ready,
@@ -22,7 +27,7 @@ enum StepState {
 }
 
 impl StepState {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Idle => "WAITING",
             Self::Ready => "READY",
@@ -31,7 +36,7 @@ impl StepState {
         }
     }
 
-    fn progress(self) -> f32 {
+    pub(crate) fn progress(self) -> f32 {
         match self {
             Self::Idle => 0.0,
             Self::Ready => 0.45,
@@ -41,37 +46,49 @@ impl StepState {
     }
 }
 
-struct AppState {
-    selected_paths: Vec<PathBuf>,
-    selected_inputs: Vec<String>,
-    gerber_to_png: StepState,
-    png_to_gcode: StepState,
-    generated_png: Option<String>,
-    generated_gcode: Option<String>,
-    status: String,
-    dpi_input: String,
-    cut_z_mm_input: String,
-    safe_z_mm_input: String,
-    feed_rate_input: String,
-    plunge_rate_input: String,
-    spindle_speed_input: String,
-    tool_diameter_mm_input: String,
-    offset_number_input: String,
-    offset_stepover_input: String,
-    estimated_time: String,
-    cut_distance: String,
-    board_dimensions: String,
+pub(crate) struct AppState {
+    pub(crate) copper_paths: Vec<PathBuf>,
+    pub(crate) outline_paths: Vec<PathBuf>,
+    pub(crate) drill_paths: Vec<PathBuf>,
+    pub(crate) loaded_png_path: Option<PathBuf>,
+    pub(crate) loaded_inputs: Vec<String>,
+    pub(crate) gerber_to_png: StepState,
+    pub(crate) png_to_gcode: StepState,
+    pub(crate) generated_png_path: Option<String>,
+    pub(crate) generated_gcode: Option<String>,
+    pub(crate) gerber_to_png_progress: f32,
+    pub(crate) png_to_gcode_progress: f32,
+    pub(crate) status: String,
+    pub(crate) dpi_input: String,
+    pub(crate) cut_z_mm_input: String,
+    pub(crate) safe_z_mm_input: String,
+    pub(crate) feed_rate_input: String,
+    pub(crate) plunge_rate_input: String,
+    pub(crate) spindle_speed_input: String,
+    pub(crate) tool_diameter_mm_input: String,
+    pub(crate) offset_number_input: String,
+    pub(crate) offset_stepover_input: String,
+    pub(crate) estimated_time: String,
+    pub(crate) cut_distance: String,
+    pub(crate) board_dimensions: String,
+    pub(crate) png_progress: Arc<AtomicU32>,
+    pub(crate) gcode_progress: Arc<AtomicU32>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            selected_paths: Vec::new(),
-            selected_inputs: Vec::new(),
+            copper_paths: Vec::new(),
+            outline_paths: Vec::new(),
+            drill_paths: Vec::new(),
+            loaded_png_path: None,
+            loaded_inputs: Vec::new(),
             gerber_to_png: StepState::default(),
             png_to_gcode: StepState::default(),
-            generated_png: None,
+            generated_png_path: None,
             generated_gcode: None,
+            gerber_to_png_progress: 0.0,
+            png_to_gcode_progress: 0.0,
             status: String::new(),
             dpi_input: format!("{DEFAULT_DPI:.0}"),
             cut_z_mm_input: "-0.1".to_owned(),
@@ -85,6 +102,8 @@ impl Default for AppState {
             estimated_time: "--:--:--".to_owned(),
             cut_distance: "0.0 mm".to_owned(),
             board_dimensions: "0.0 x 0.0 mm".to_owned(),
+            png_progress: Arc::new(AtomicU32::new(0)),
+            gcode_progress: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -108,15 +127,26 @@ impl AppState {
 }
 
 #[derive(Debug, Clone)]
-enum Message {
-    SelectGerberFiles,
-    SelectZipArchive,
-    GerberFilesPicked(Option<Vec<PathBuf>>),
-    ZipArchivePicked(Option<PathBuf>),
-    RunPipeline,
-    PipelineFinished(Result<PipelineOutput, String>),
+pub(crate) enum Message {
+    SelectCopperFiles,
+    SelectOutlineFiles,
+    SelectDrillFiles,
+    CopperFilesPicked(Option<Vec<PathBuf>>),
+    OutlineFilesPicked(Option<Vec<PathBuf>>),
+    DrillFilesPicked(Option<Vec<PathBuf>>),
+    LoadPng,
+    LoadPngPicked(Option<PathBuf>),
+    ConvertToPng,
+    ConvertToPngFinished(Result<PngLayerResults, String>),
+    SavePng,
+    SavePngPathPicked(Option<PathBuf>),
+    GenerateGcode,
+    GenerateGcodeFinished(Result<GcodeResult, String>),
     SaveGcode,
     GcodeSavePathPicked(Option<PathBuf>),
+    GerberProgress(f32),
+    GcodeProgress(f32),
+    PollProgress,
     Reset,
     DpiChanged(String),
     CutZChanged(String),
@@ -129,157 +159,275 @@ enum Message {
     OffsetStepoverChanged(String),
 }
 
-#[derive(Debug, Clone)]
-struct PipelineOutput {
-    png: PngRenderResult,
-    gcode: GcodeResult,
+fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
+    let mut labels = Vec::new();
+    for p in &state.copper_paths {
+        labels.push(format!("[Copper] {}", path_to_label(p.clone())));
+    }
+    for p in &state.outline_paths {
+        labels.push(format!("[Outline] {}", path_to_label(p.clone())));
+    }
+    for p in &state.drill_paths {
+        labels.push(format!("[Drill] {}", path_to_label(p.clone())));
+    }
+    labels
 }
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
     match message {
-        Message::SelectGerberFiles => {
-            info!("opening gerber file picker");
-            state.status = "Waiting for Gerber file selection...".to_owned();
-
+        Message::SelectCopperFiles => {
             return Task::perform(
                 async {
                     rfd::FileDialog::new()
-                        .add_filter("Gerber", &["gbr", "grb", "gtl", "gbl", "gko", "gto", "gbo"])
-                        .add_filter("Drill", &["drl"])
-                        .set_title("Select Gerber and drill files")
+                        .add_filter("Copper", &["gbr", "grb", "gtl", "gbl"])
+                        .set_title("Select Copper Layer files")
                         .pick_files()
                 },
-                Message::GerberFilesPicked,
+                Message::CopperFilesPicked,
             );
         }
-        Message::SelectZipArchive => {
-            info!("opening zip archive picker");
-            state.status = "Waiting for archive selection...".to_owned();
-
+        Message::SelectOutlineFiles => {
             return Task::perform(
                 async {
                     rfd::FileDialog::new()
-                        .add_filter("ZIP archive", &["zip"])
-                        .set_title("Select zipped Gerber package")
-                        .pick_file()
+                        .add_filter("Board Outline", &["gko", "gbr", "ou"])
+                        .set_title("Select Board Profile / Outline files")
+                        .pick_files()
                 },
-                Message::ZipArchivePicked,
+                Message::OutlineFilesPicked,
             );
         }
-        Message::GerberFilesPicked(files) => {
+        Message::SelectDrillFiles => {
+            return Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter("Drill", &["drl", "txt", "xln"])
+                        .set_title("Select Drill files")
+                        .pick_files()
+                },
+                Message::DrillFilesPicked,
+            );
+        }
+        Message::CopperFilesPicked(files) => {
             if let Some(files) = files {
-                if files.is_empty() {
-                    warn!("gerber file picker returned an empty selection");
-                    state.status = "No files selected.".to_owned();
-                    return Task::none();
-                }
+                state.copper_paths = files;
+                state.loaded_inputs = derive_loaded_inputs(state);
+                state.gerber_to_png = StepState::Ready;
+                state.status = "Copper layers loaded.".into();
+            }
+        }
+        Message::OutlineFilesPicked(files) => {
+            if let Some(files) = files {
+                state.outline_paths = files;
+                state.loaded_inputs = derive_loaded_inputs(state);
+                state.status = "Outline loaded.".into();
+            }
+        }
+        Message::DrillFilesPicked(files) => {
+            if let Some(files) = files {
+                state.drill_paths = files;
+                state.loaded_inputs = derive_loaded_inputs(state);
+                state.status = "Drills loaded.".into();
+            }
+        }
+        Message::LoadPng => {
+            return Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter("PNG image", &["png"])
+                        .set_title("Load existing rendered PNG")
+                        .pick_file()
+                },
+                Message::LoadPngPicked,
+            );
+        }
+        Message::LoadPngPicked(file) => {
+            if let Some(path) = file {
+                state.loaded_png_path = Some(path.clone());
+                state.generated_png_path = Some(path.to_string_lossy().into_owned());
+                state.png_to_gcode = StepState::Ready;
+                state.status = "PNG loaded. Ready to generate G-code.".into();
+            }
+        }
+        Message::ConvertToPng => {
+            let copper = state.copper_paths.clone();
+            let outline = state.outline_paths.clone();
+            let drill = state.drill_paths.clone();
 
-                state.selected_paths = files;
-                state.selected_inputs = state
-                    .selected_paths
-                    .iter()
-                    .cloned()
-                    .map(path_to_label)
-                    .collect();
-                state.gerber_to_png = StepState::Ready;
-                state.png_to_gcode = StepState::Idle;
-                state.generated_png = None;
-                state.generated_gcode = None;
-                info!(
-                    input_count = state.selected_paths.len(),
-                    "selected gerber input files"
-                );
-                state.status = "Gerber inputs selected. Pipeline primed.".to_owned();
-            } else {
-                info!("gerber file selection canceled");
-                state.status = "Gerber selection canceled.".to_owned();
-            }
-        }
-        Message::ZipArchivePicked(file) => {
-            if let Some(file) = file {
-                state.selected_paths = vec![file.clone()];
-                state.selected_inputs = vec![path_to_label(file)];
-                state.gerber_to_png = StepState::Ready;
-                state.png_to_gcode = StepState::Idle;
-                state.generated_png = None;
-                state.generated_gcode = None;
-                info!(path = %state.selected_paths[0].display(), "selected gerber zip archive");
-                state.status = "Archive loaded. Pipeline primed.".to_owned();
-            } else {
-                info!("zip archive selection canceled");
-                state.status = "Archive selection canceled.".to_owned();
-            }
-        }
-        Message::RunPipeline => {
-            if state.selected_paths.is_empty() {
-                warn!("pipeline requested without selected inputs");
-                state.status = "Select Gerber files or a .zip archive first.".to_owned();
+            if copper.is_empty() && outline.is_empty() && drill.is_empty() {
+                warn!("convert to png requested with no inputs loaded");
+                state.status = "Load Gerber files before converting.".to_owned();
                 return Task::none();
             }
 
-            state.gerber_to_png = StepState::Running;
-            state.png_to_gcode = StepState::Running;
-            state.generated_png = None;
-            state.generated_gcode = None;
-            state.status = "Running Gerber -> PNG -> G-code conversion...".to_owned();
-
-            let inputs = state.selected_paths.clone();
             let settings = state.get_settings();
-            info!(
-                input_count = inputs.len(),
-                pixels_per_mm = settings.pixels_per_mm,
-                cut_z_mm = settings.cut_z_mm,
-                safe_z_mm = settings.safe_z_mm,
-                feed_rate_mm_min = settings.feed_rate_mm_min,
-                plunge_rate_mm_min = settings.plunge_rate_mm_min,
-                spindle_speed_rpm = settings.spindle_speed_rpm,
-                tool_diameter_mm = settings.tool_diameter_mm,
-                offset_number = settings.offset_number,
-                offset_stepover = settings.offset_stepover,
-                "starting ui pipeline task"
+            let output_dir = std::env::temp_dir().join("easymill-render");
+            let _ = std::fs::create_dir_all(&output_dir);
+            let output_stem = "board".to_owned();
+
+            state.gerber_to_png = StepState::Running;
+            state.status = "Rendering Gerber to PNG...".to_owned();
+
+            let png_progress = state.png_progress.clone();
+            png_progress.store(0, Ordering::Relaxed);
+
+            let on_progress: Option<easymill::conversion::ProgressFn> = Some(Box::new(move |p: f32| {
+                png_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
+            }));
+
+            return Task::perform(
+                async move {
+                    spawn_blocking(move || {
+                        gerber_inputs_to_png(&copper, &outline, &drill, &output_dir, &output_stem, settings, on_progress)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| {
+                        Err(format!("Blocking task failed: {join_err}"))
+                    })
+                },
+                Message::ConvertToPngFinished,
             );
-            return Task::perform(run_conversion_pipeline(inputs, settings), Message::PipelineFinished);
         }
-        Message::PipelineFinished(result) => match result {
-            Ok(output) => {
-                let png_label = path_to_label(output.png.path.clone());
-                let dark_pixels = output.png.dark_pixels;
+        Message::ConvertToPngFinished(result) => match result {
+            Ok(layers) => {
+                state.generated_png_path =
+                    Some(layers.copper.path.to_string_lossy().into_owned());
                 state.gerber_to_png = StepState::Complete;
-                state.png_to_gcode = StepState::Complete;
-                state.generated_png = Some(output.png.path.to_string_lossy().into_owned());
-                state.generated_gcode = Some(output.gcode.gcode);
-                
-                // Format statistics
-                let hours = (output.gcode.estimated_time_secs / 3600.0) as i32;
-                let minutes = ((output.gcode.estimated_time_secs % 3600.0) / 60.0) as i32;
-                let seconds = (output.gcode.estimated_time_secs % 60.0) as i32;
-                state.estimated_time = format!("{hours:02}:{minutes:02}:{seconds:02}");
-                state.cut_distance = format!("{:.1} mm", output.gcode.cut_distance_mm);
-                state.board_dimensions = format!("{:.1} x {:.1} mm", output.gcode.width_mm, output.gcode.height_mm);
-                
-                info!(
-                    png = %png_label,
-                    dark_pixels,
-                    gcode_bytes = state.generated_gcode.as_ref().map(|value| value.len()).unwrap_or_default(),
-                    estimated_time = %state.estimated_time,
-                    cut_distance = %state.cut_distance,
-                    board_dimensions = %state.board_dimensions,
-                    "ui pipeline task completed"
-                );
+                state.gerber_to_png_progress = 1.0;
+                state.png_progress.store(1000, Ordering::Relaxed);
+                state.png_to_gcode = StepState::Ready;
                 state.status = format!(
-                    "Run complete. PNG saved to {png_label}; {dark_pixels} cut pixels converted to G-code."
+                    "Rendered {}x{} traces ({} dark px). Ready to generate G-code.",
+                    layers.copper.width,
+                    layers.copper.height,
+                    layers.copper.dark_pixels,
                 );
             }
             Err(err) => {
                 state.gerber_to_png = StepState::Ready;
-                state.png_to_gcode = StepState::Idle;
-                state.generated_png = None;
-                state.generated_gcode = None;
-                state.estimated_time = "--:--:--".to_owned();
-                state.cut_distance = "0.0 mm".to_owned();
-                state.board_dimensions = "0.0 x 0.0 mm".to_owned();
-                error!(error = %err, "ui pipeline task failed");
-                state.status = format!("Pipeline failed: {err}");
+                state.status = format!("Rendering failed: {err}");
+                error!("gerber to png conversion failed: {err}");
+            }
+        },
+        Message::SavePng => {
+            if state.generated_png_path.is_none() {
+                warn!("save png requested before png was generated");
+                state.status = "Run the conversion before saving PNG.".to_owned();
+                return Task::none();
+            }
+
+            return Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter("PNG", &["png"])
+                        .set_file_name("output.png")
+                        .set_title("Save rendered PNG")
+                        .save_file()
+                },
+                Message::SavePngPathPicked,
+            );
+        }
+        Message::SavePngPathPicked(path) => {
+            if let Some(dest) = path {
+                if let Some(src) = &state.generated_png_path {
+                    match fs::copy(src, &dest) {
+                        Ok(_) => {
+                            info!(src = %src, dest = %dest.display(), "saved rendered png");
+                            state.status =
+                                format!("Saved PNG to {}.", path_to_label(dest));
+                        }
+                        Err(err) => {
+                            error!(src = %src, dest = %dest.display(), error = %err, "failed to save png");
+                            state.status = format!("Failed to save PNG: {err}");
+                        }
+                    }
+                } else {
+                    warn!("save path selected but generated png was unavailable");
+                    state.status = "No generated PNG available to save.".to_owned();
+                }
+            } else {
+                state.status = "Save canceled.".to_owned();
+            }
+        }
+        Message::GenerateGcode => {
+            let png_path = state
+                .generated_png_path
+                .clone()
+                .or_else(|| {
+                    state
+                        .loaded_png_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                });
+
+            let png_path = match png_path {
+                Some(p) => p,
+                None => {
+                    warn!("generate gcode requested with no png loaded");
+                    state.status = "Generate a PNG or load one first.".to_owned();
+                    return Task::none();
+                }
+            };
+
+            let settings = state.get_settings();
+
+            state.png_to_gcode = StepState::Running;
+            state.status = "Generating G-code from PNG...".to_owned();
+
+            let gcode_progress = state.gcode_progress.clone();
+            gcode_progress.store(0, Ordering::Relaxed);
+
+            let on_progress: Option<easymill::conversion::ProgressFn> = Some(Box::new(move |p: f32| {
+                gcode_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
+            }));
+
+            return Task::perform(
+                async move {
+                    spawn_blocking(move || {
+                        png_to_gcode(&PathBuf::from(&png_path), settings, on_progress)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| {
+                        Err(format!("Blocking task failed: {join_err}"))
+                    })
+                },
+                Message::GenerateGcodeFinished,
+            );
+        }
+        Message::GenerateGcodeFinished(result) => match result {
+            Ok(gcode_result) => {
+                state.generated_gcode = Some(gcode_result.gcode);
+                state.png_to_gcode = StepState::Complete;
+                state.png_to_gcode_progress = 1.0;
+                state.gcode_progress.store(1000, Ordering::Relaxed);
+
+                let time_secs = gcode_result.estimated_time_secs;
+                let hours = (time_secs / 3600.0) as u32;
+                let mins = ((time_secs % 3600.0) / 60.0) as u32;
+                let secs = (time_secs % 60.0) as u32;
+                state.estimated_time = format!("{hours:02}:{mins:02}:{secs:02}");
+                state.cut_distance =
+                    format!("{:.1} mm", gcode_result.cut_distance_mm);
+                state.board_dimensions = format!(
+                    "{:.1} x {:.1} mm",
+                    gcode_result.width_mm, gcode_result.height_mm
+                );
+
+                state.status = format!(
+                    "Generated G-code: {} paths, {:.1}m cut, est. {:02}:{:02}:{:02}.",
+                    gcode_result.paths.len(),
+                    gcode_result.cut_distance_mm / 1000.0,
+                    hours,
+                    mins,
+                    secs,
+                );
+            }
+            Err(err) => {
+                state.png_to_gcode = StepState::Ready;
+                state.status = format!("G-code generation failed: {err}");
+                error!("png to gcode conversion failed: {err}");
             }
         },
         Message::SaveGcode => {
@@ -332,6 +480,22 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.status = "Save canceled.".to_owned();
             }
         }
+        Message::GerberProgress(p) => {
+            state.gerber_to_png_progress = p;
+        }
+        Message::GcodeProgress(p) => {
+            state.png_to_gcode_progress = p;
+        }
+        Message::PollProgress => {
+            if state.gerber_to_png == StepState::Running {
+                let p = state.png_progress.load(Ordering::Relaxed);
+                state.gerber_to_png_progress = p as f32 / 1000.0;
+            }
+            if state.png_to_gcode == StepState::Running {
+                let p = state.gcode_progress.load(Ordering::Relaxed);
+                state.png_to_gcode_progress = p as f32 / 1000.0;
+            }
+        }
         Message::Reset => {
             info!("resetting application state");
             *state = AppState::default();
@@ -372,259 +536,26 @@ fn theme(_state: &AppState) -> Theme {
     Theme::TokyoNight
 }
 
-fn setting_field<'a>(
-    label: &'a str,
-    value: &'a str,
-    on_change: impl Fn(String) -> Message + 'a,
-) -> Element<'a, Message> {
-    column![
-        text(label)
-            .size(12)
-            .font(Font::MONOSPACE)
-            .color(Color::from_rgb(0.57, 0.62, 0.68)),
-        text_input("", value)
-            .on_input(on_change)
-            .padding([7, 10])
-            .size(13)
-            .width(Length::Fill),
-    ]
-    .spacing(4)
-    .into()
-}
-
 fn view(state: &AppState) -> Element<'_, Message> {
-    let source_actions = column![
-        button("Load Gerber set")
-            .style(primary_action_style)
-            .width(Length::Fill)
-            .padding([11, 16])
-            .on_press(Message::SelectGerberFiles),
-        row![
-            button("Load .zip")
-                .style(secondary_action_style)
-                .width(Length::Fill)
-                .padding([10, 14])
-                .on_press(Message::SelectZipArchive),
-            button("Reset")
-                .style(ghost_action_style)
-                .width(Length::Fill)
-                .padding([10, 14])
-                .on_press(Message::Reset),
-        ]
-        .spacing(10),
-    ]
-    .spacing(10);
+    use ui::{header, source_panel, config_panel, pipeline_panel, stats_panel, status_line};
 
-    let selected_items: Element<'_, Message> = if state.selected_inputs.is_empty() {
-        container(
-            text("No input selected")
-                .size(14)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.48, 0.55, 0.60)),
-        )
-        .width(Length::Fill)
-        .height(132)
-        .padding([12, 14])
-        .style(inset_style())
-        .into()
-    } else {
-        let list = state
-            .selected_inputs
-            .iter()
-            .fold(column![].spacing(7), |col, item| {
-                col.push(
-                    row![
-                        text(">")
-                            .size(14)
-                            .font(Font::MONOSPACE)
-                            .color(Color::from_rgb(0.37, 0.89, 0.68,)),
-                        text(item)
-                            .size(14)
-                            .font(Font::MONOSPACE)
-                            .color(Color::from_rgb(0.79, 0.84, 0.88)),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-            });
-
-        container(list)
-            .width(Length::Fill)
-            .height(132)
-            .padding([12, 14])
-            .style(inset_style())
-            .into()
-    };
-
-    let source_panel = container(
-        column![
-            text("INPUT SOURCE")
-                .size(13)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.84, 0.70, 0.43)),
-            text("Select Gerber files or a zipped Gerber package")
-                .size(15)
-                .color(Color::from_rgb(0.62, 0.67, 0.72)),
-            source_actions,
-            text("Loaded assets")
-                .size(12)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.42, 0.47, 0.53)),
-            selected_items,
-        ]
-        .spacing(12),
-    )
-    .width(Length::Fill)
-    .padding(18)
-    .style(panel_style());
-
-    let settings_panel = container(
-        column![
-            text("PIPELINE CONFIG")
-                .size(13)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.84, 0.70, 0.43)),
-            text("Adjust CAM and G-code generation parameters")
-                .size(15)
-                .color(Color::from_rgb(0.62, 0.67, 0.72)),
-            column![
-                setting_field("Resolution (DPI)", &state.dpi_input, Message::DpiChanged),
-                setting_field("Safe Z height (mm)", &state.safe_z_mm_input, Message::SafeZChanged),
-                setting_field("Cut Z depth (mm)", &state.cut_z_mm_input, Message::CutZChanged),
-                setting_field("Feed rate (mm/min)", &state.feed_rate_input, Message::FeedRateChanged),
-                setting_field("Plunge rate (mm/min)", &state.plunge_rate_input, Message::PlungeRateChanged),
-                setting_field("Spindle speed (RPM)", &state.spindle_speed_input, Message::SpindleSpeedChanged),
-                setting_field("Tool diameter (mm)", &state.tool_diameter_mm_input, Message::ToolDiameterChanged),
-                setting_field("Offset count (0=fill)", &state.offset_number_input, Message::OffsetNumberChanged),
-                setting_field("Offset stepover", &state.offset_stepover_input, Message::OffsetStepoverChanged),
-            ]
-            .spacing(10)
-        ]
-        .spacing(12),
-    )
-    .width(Length::Fill)
-    .padding(18)
-    .style(panel_style());
-
-    let pipeline_panel = container(
-        column![
-            row![
-                text("PIPELINE")
-                    .size(13)
-                    .font(Font::MONOSPACE)
-                    .color(Color::from_rgb(0.84, 0.70, 0.43)),
-                container("").width(Length::Fill),
-                progress_chip(state),
-            ]
-            .width(Length::Fill)
-            .align_y(Alignment::Center),
-            text("Automated conversion chain")
-                .size(16)
-                .color(Color::from_rgb(0.74, 0.79, 0.84)),
-            step_card(
-                "STAGE 01",
-                "GERBER -> PNG",
-                "Rasterization",
-                state.gerber_to_png,
-                Color::from_rgb(0.39, 0.89, 0.64),
-            ),
-            step_card(
-                "STAGE 02",
-                "PNG -> GCODE",
-                "Toolpath generation",
-                state.png_to_gcode,
-                Color::from_rgb(0.91, 0.74, 0.38),
-            ),
-            generated_output(state),
-            button("Run Pipeline")
-                .style(primary_action_style)
-                .width(Length::Fill)
-                .padding([12, 16])
-                .on_press(Message::RunPipeline),
-            save_gcode_button(state),
-        ]
-        .spacing(14),
-    )
-    .width(Length::Fill)
-    .padding(20)
-    .style(panel_style());
-
-    let status_line = container(
-        row![
-            text("SYSTEM STATUS")
-                .size(12)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.84, 0.70, 0.43)),
-            text(if state.status.is_empty() {
-                "Idle"
-            } else {
-                &state.status
-            })
-            .size(14)
-            .font(Font::MONOSPACE)
-            .color(Color::from_rgb(0.77, 0.83, 0.87)),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
-    )
-    .padding([10, 14])
-    .style(inset_style());
-
-    let stats_panel = container(
-        column![
-            text("JOB STATISTICS")
-                .size(13)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.84, 0.70, 0.43)),
-            column![
-                row![
-                    text("Est. Cut Time:").size(14).color(Color::from_rgb(0.57, 0.62, 0.68)),
-                    container("").width(Length::Fill),
-                    text(&state.estimated_time).size(14).font(Font::MONOSPACE).color(Color::from_rgb(0.89, 0.91, 0.93)),
-                ],
-                row![
-                    text("Cut Distance:").size(14).color(Color::from_rgb(0.57, 0.62, 0.68)),
-                    container("").width(Length::Fill),
-                    text(&state.cut_distance).size(14).font(Font::MONOSPACE).color(Color::from_rgb(0.89, 0.91, 0.93)),
-                ],
-                row![
-                    text("Board Size:").size(14).color(Color::from_rgb(0.57, 0.62, 0.68)),
-                    container("").width(Length::Fill),
-                    text(&state.board_dimensions).size(14).font(Font::MONOSPACE).color(Color::from_rgb(0.89, 0.91, 0.93)),
-                ],
-            ]
-            .spacing(10)
-        ]
-        .spacing(12)
-    )
-    .width(Length::Fill)
-    .padding(18)
-    .style(panel_style());
-
-    let left_column = column![
-        source_panel,
-        stats_panel,
-    ]
-    .spacing(16);
+    let left_column = column![source_panel(state), config_panel(state), stats_panel(state)].spacing(16);
 
     let shell = column![
         header(),
         row![
             container(left_column)
-                .width(Length::FillPortion(3))
+                .width(Length::FillPortion(5))
                 .height(Length::Fill),
-            container(settings_panel)
-                .width(Length::FillPortion(3))
-                .height(Length::Fill),
-            container(pipeline_panel)
-                .width(Length::FillPortion(4))
+            container(pipeline_panel(state))
+                .width(Length::FillPortion(5))
                 .height(Length::Fill),
         ]
         .width(Length::Fill)
         .height(Length::Fill)
         .align_y(Alignment::Start)
         .spacing(16),
-        status_line,
+        status_line(state),
     ]
     .spacing(16)
     .height(Length::Fill)
@@ -635,237 +566,16 @@ fn view(state: &AppState) -> Element<'_, Message> {
         .height(Length::Fill)
         .center_x(Length::Fill)
         .padding([20, 24])
-        .style(app_style())
+        .style(ui::styles::app_style())
         .into()
 }
 
-fn header<'a>() -> Element<'a, Message> {
-    container(
-        row![
-            container(text("EM").size(18).color(Color::from_rgb(0.06, 0.10, 0.14)))
-                .padding([8, 11])
-                .style(|_| {
-                    container::Style::default()
-                        .background(Background::Color(Color::from_rgb(0.91, 0.74, 0.38)))
-                        .border(border::rounded(8.0))
-                }),
-            container(
-                column![
-                    text("EasyMill")
-                        .size(36)
-                        .color(Color::from_rgb(0.89, 0.91, 0.93)),
-                    text("Gerber to G-code pipeline")
-                        .size(16)
-                        .font(Font::MONOSPACE)
-                        .color(Color::from_rgb(0.57, 0.62, 0.68)),
-                ]
-                .spacing(2),
-            )
-            .width(Length::Fill),
-            container(
-                text("TECH PREVIEW")
-                    .size(11)
-                    .font(Font::MONOSPACE)
-                    .color(Color::from_rgb(0.39, 0.89, 0.64)),
-            )
-            .padding([7, 10])
-            .style(inset_style()),
-        ]
-        .spacing(14)
-        .align_y(Alignment::Center),
-    )
-    .padding(16)
-    .style(panel_style())
-    .into()
-}
-
-fn progress_chip<'a>(state: &AppState) -> Element<'a, Message> {
-    let percent = ((state.gerber_to_png.progress() + state.png_to_gcode.progress()) * 50.0) as i32;
-
-    container(
-        text(format!("{percent}% COMPLETE"))
-            .size(11)
-            .font(Font::MONOSPACE)
-            .color(Color::from_rgb(0.93, 0.79, 0.51)),
-    )
-    .padding([6, 9])
-    .style(|_| {
-        container::Style::default()
-            .background(Background::Color(Color::from_rgba(0.74, 0.54, 0.24, 0.16)))
-            .border(
-                border::rounded(8.0)
-                    .width(1.0)
-                    .color(Color::from_rgba(0.90, 0.72, 0.40, 0.42)),
-            )
-    })
-    .into()
-}
-
-fn step_card<'a>(
-    stage: &'a str,
-    title: &'a str,
-    subtitle: &'a str,
-    state: StepState,
-    accent: Color,
-) -> Element<'a, Message> {
-    let status_pill = container(
-        text(state.label())
-            .size(11)
-            .font(Font::MONOSPACE)
-            .color(Color::from_rgb(0.86, 0.90, 0.92)),
-    )
-    .padding([5, 8])
-    .style(move |_| {
-        container::Style::default()
-            .background(Background::Color(Color { a: 0.20, ..accent }))
-            .border(
-                border::rounded(8.0)
-                    .width(1.0)
-                    .color(Color { a: 0.46, ..accent }),
-            )
-    });
-
-    container(
-        column![
-            row![
-                text(stage)
-                    .size(11)
-                    .font(Font::MONOSPACE)
-                    .color(Color::from_rgb(0.47, 0.53, 0.60)),
-                container("").width(Length::Fill),
-                status_pill,
-            ]
-            .width(Length::Fill)
-            .align_y(Alignment::Center),
-            text(title)
-                .size(21)
-                .font(Font::MONOSPACE)
-                .color(Color::from_rgb(0.90, 0.92, 0.93)),
-            text(subtitle)
-                .size(14)
-                .color(Color::from_rgb(0.58, 0.64, 0.70)),
-            progress_bar(0.0..=1.0, state.progress()),
-        ]
-        .spacing(10),
-    )
-    .padding(14)
-    .style(inset_style())
-    .into()
-}
-
-fn app_style() -> impl Fn(&Theme) -> container::Style {
-    |_| container::Style::default().background(Background::Color(Color::from_rgb(0.03, 0.04, 0.05)))
-}
-
-fn panel_style() -> impl Fn(&Theme) -> container::Style {
-    |_| {
-        container::Style::default()
-            .background(Background::Color(Color::from_rgb(0.07, 0.08, 0.10)))
-            .border(
-                border::rounded(20.0)
-                    .width(1.0)
-                    .color(Color::from_rgba(0.44, 0.48, 0.54, 0.38)),
-            )
-            .shadow(Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.62),
-                offset: Vector::new(0.0, 10.0),
-                blur_radius: 30.0,
-            })
-    }
-}
-
-fn inset_style() -> impl Fn(&Theme) -> container::Style {
-    |_| {
-        container::Style::default()
-            .background(Background::Color(Color::from_rgb(0.10, 0.11, 0.13)))
-            .border(
-                border::rounded(16.0)
-                    .width(1.0)
-                    .color(Color::from_rgba(0.36, 0.40, 0.46, 0.33)),
-            )
-    }
-}
-
-fn primary_action_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: Some(Background::Color(Color::from_rgb(0.37, 0.89, 0.68))),
-        text_color: Color::from_rgb(0.06, 0.10, 0.12),
-        border: border::rounded(12.0),
-        shadow: Shadow::default(),
-        ..button::Style::default()
-    };
-
-    match status {
-        button::Status::Hovered => button::Style {
-            background: Some(Background::Color(Color::from_rgb(0.45, 0.93, 0.74))),
-            ..base
-        },
-        button::Status::Pressed => button::Style {
-            background: Some(Background::Color(Color::from_rgb(0.30, 0.78, 0.58))),
-            ..base
-        },
-        button::Status::Disabled => button::Style {
-            background: Some(Background::Color(Color::from_rgba(0.37, 0.89, 0.68, 0.35))),
-            text_color: Color::from_rgba(0.08, 0.11, 0.14, 0.60),
-            ..base
-        },
-        button::Status::Active => base,
-    }
-}
-
-fn secondary_action_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: Some(Background::Color(Color::from_rgb(0.90, 0.72, 0.39))),
-        text_color: Color::from_rgb(0.10, 0.08, 0.06),
-        border: border::rounded(12.0),
-        shadow: Shadow::default(),
-        ..button::Style::default()
-    };
-
-    match status {
-        button::Status::Hovered => button::Style {
-            background: Some(Background::Color(Color::from_rgb(0.94, 0.77, 0.46))),
-            ..base
-        },
-        button::Status::Pressed => button::Style {
-            background: Some(Background::Color(Color::from_rgb(0.77, 0.61, 0.31))),
-            ..base
-        },
-        button::Status::Disabled => button::Style {
-            background: Some(Background::Color(Color::from_rgba(0.90, 0.72, 0.39, 0.40))),
-            text_color: Color::from_rgba(0.10, 0.08, 0.06, 0.60),
-            ..base
-        },
-        button::Status::Active => base,
-    }
-}
-
-fn ghost_action_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: Some(Background::Color(Color::from_rgba(0.16, 0.18, 0.22, 0.0))),
-        text_color: Color::from_rgb(0.61, 0.67, 0.73),
-        border: border::rounded(12.0)
-            .width(1.0)
-            .color(Color::from_rgba(0.38, 0.42, 0.48, 0.35)),
-        shadow: Shadow::default(),
-        ..button::Style::default()
-    };
-
-    match status {
-        button::Status::Hovered => button::Style {
-            background: Some(Background::Color(Color::from_rgba(0.20, 0.22, 0.27, 0.65))),
-            text_color: Color::from_rgb(0.74, 0.79, 0.84),
-            ..base
-        },
-        button::Status::Pressed => button::Style {
-            background: Some(Background::Color(Color::from_rgba(0.15, 0.17, 0.21, 0.78))),
-            ..base
-        },
-        button::Status::Disabled => button::Style {
-            text_color: Color::from_rgba(0.61, 0.67, 0.73, 0.45),
-            ..base
-        },
-        button::Status::Active => base,
+fn subscription(state: &AppState) -> Subscription<Message> {
+    if state.gerber_to_png == StepState::Running || state.png_to_gcode == StepState::Running {
+        iced::time::every(Duration::from_millis(100))
+            .map(|_| Message::PollProgress)
+    } else {
+        Subscription::none()
     }
 }
 
@@ -876,6 +586,7 @@ pub fn main() -> iced::Result {
     info!("starting easymill ui");
 
     iced::application(AppState::default, update, view)
+        .subscription(subscription)
         .theme(theme)
         .title("EasyMill")
         .run()
@@ -883,107 +594,6 @@ pub fn main() -> iced::Result {
 
 fn path_to_label(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
-}
-
-fn save_gcode_button<'a>(state: &AppState) -> Element<'a, Message> {
-    let button = button("Save generated G-code")
-        .style(secondary_action_style)
-        .width(Length::Fill)
-        .padding([12, 16]);
-
-    if state.generated_gcode.is_some() {
-        button.on_press(Message::SaveGcode).into()
-    } else {
-        button.into()
-    }
-}
-
-fn generated_output<'a>(state: &'a AppState) -> Element<'a, Message> {
-    let header = text("OUTPUT PREVIEW")
-        .size(11)
-        .font(Font::MONOSPACE)
-        .color(Color::from_rgb(0.47, 0.53, 0.60));
-
-    if let Some(png_path) = &state.generated_png {
-        let png_label = path_to_label(PathBuf::from(png_path));
-        let img_widget = image(iced::widget::image::Handle::from_path(png_path))
-            .width(Length::Fill)
-            .height(Length::Fixed(180.0));
-
-        container(
-            column![
-                header,
-                text(format!("Render: {png_label}"))
-                    .size(12)
-                    .font(Font::MONOSPACE)
-                    .color(Color::from_rgb(0.75, 0.81, 0.85)),
-                container(img_widget)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(180.0))
-                    .style(inset_style()),
-            ]
-            .spacing(8)
-        )
-        .width(Length::Fill)
-        .padding(14)
-        .style(inset_style())
-        .into()
-    } else {
-        container(
-            column![
-                header,
-                text("No preview available. Run pipeline to generate.")
-                    .size(13)
-                    .font(Font::MONOSPACE)
-                    .color(Color::from_rgb(0.48, 0.55, 0.60)),
-            ]
-            .spacing(8)
-        )
-        .width(Length::Fill)
-        .padding(14)
-        .style(inset_style())
-        .into()
-    }
-}
-
-async fn run_conversion_pipeline(inputs: Vec<PathBuf>, settings: ConversionSettings) -> Result<PipelineOutput, String> {
-    let png_path = temporary_png_path();
-    info!(
-        input_count = inputs.len(),
-        png = %png_path.display(),
-        "running conversion pipeline"
-    );
-
-    // Run blocking PNG render on the blocking thread pool so the async
-    // executor (and the UI event loop) stay responsive.
-    let inputs_clone = inputs.clone();
-    let settings_clone = settings.clone();
-    let png_path_clone = png_path.clone();
-    let png = tokio::task::spawn_blocking(move || {
-        gerber_inputs_to_png(&inputs_clone, &png_path_clone, settings_clone)
-    })
-    .await
-    .map_err(|e| format!("PNG render thread panicked: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    // Same for G-code generation — also CPU-intensive.
-    let png_path_for_gcode = png.path.clone();
-    let gcode = tokio::task::spawn_blocking(move || {
-        png_to_gcode(&png_path_for_gcode, settings)
-    })
-    .await
-    .map_err(|e| format!("G-code thread panicked: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    info!(
-        png = %png.path.display(),
-        width = png.width,
-        height = png.height,
-        dark_pixels = png.dark_pixels,
-        gcode_bytes = gcode.gcode.len(),
-        "conversion pipeline finished"
-    );
-    Ok(PipelineOutput { png, gcode })
 }
 
 fn temporary_png_path() -> PathBuf {
