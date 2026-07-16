@@ -54,7 +54,7 @@ pub(crate) struct AppState {
     pub(crate) loaded_inputs: Vec<String>,
     pub(crate) gerber_to_png: StepState,
     pub(crate) png_to_gcode: StepState,
-    pub(crate) generated_png_path: Option<String>,
+    pub(crate) generated_pngs: Option<PngLayerResults>,
     pub(crate) generated_gcode: Option<String>,
     pub(crate) gerber_to_png_progress: f32,
     pub(crate) png_to_gcode_progress: f32,
@@ -85,7 +85,7 @@ impl Default for AppState {
             loaded_inputs: Vec::new(),
             gerber_to_png: StepState::default(),
             png_to_gcode: StepState::default(),
-            generated_png_path: None,
+            generated_pngs: None,
             generated_gcode: None,
             gerber_to_png_progress: 0.0,
             png_to_gcode_progress: 0.0,
@@ -138,14 +138,16 @@ pub(crate) enum Message {
     LoadPngPicked(Option<PathBuf>),
     ConvertToPng,
     ConvertToPngFinished(Result<PngLayerResults, String>),
-    SavePng,
-    SavePngPathPicked(Option<PathBuf>),
+    SaveCopperPng,
+    SaveDrillPng,
+    SaveOutlinePng,
+    SaveAllPngs,
+    SaveAllPngsFinished((Option<PathBuf>, PngLayerResults)),
+    SavePngPathPicked((Option<PathBuf>, PathBuf)),
     GenerateGcode,
     GenerateGcodeFinished(Result<GcodeResult, String>),
     SaveGcode,
     GcodeSavePathPicked(Option<PathBuf>),
-    GerberProgress(f32),
-    GcodeProgress(f32),
     PollProgress,
     Reset,
     DpiChanged(String),
@@ -244,7 +246,6 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::LoadPngPicked(file) => {
             if let Some(path) = file {
                 state.loaded_png_path = Some(path.clone());
-                state.generated_png_path = Some(path.to_string_lossy().into_owned());
                 state.png_to_gcode = StepState::Ready;
                 state.status = "PNG loaded. Ready to generate G-code.".into();
             }
@@ -291,14 +292,14 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::ConvertToPngFinished(result) => match result {
             Ok(layers) => {
-                state.generated_png_path =
-                    Some(layers.copper.path.to_string_lossy().into_owned());
+                state.generated_pngs = Some(layers.clone());
                 state.gerber_to_png = StepState::Complete;
                 state.gerber_to_png_progress = 1.0;
                 state.png_progress.store(1000, Ordering::Relaxed);
                 state.png_to_gcode = StepState::Ready;
+                state.loaded_png_path = Some(layers.copper.path.clone());
                 state.status = format!(
-                    "Rendered {}x{} traces ({} dark px). Ready to generate G-code.",
+                    "Rendered 3 PNGs ({}x{}). Copper: {} dark px. Ready for G-code.",
                     layers.copper.width,
                     layers.copper.height,
                     layers.copper.dark_pixels,
@@ -307,62 +308,121 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             Err(err) => {
                 state.gerber_to_png = StepState::Ready;
                 state.status = format!("Rendering failed: {err}");
-                error!("gerber to png conversion failed: {err}");
+                error!("gerber to 3-png conversion failed: {err}");
             }
         },
-        Message::SavePng => {
-            if state.generated_png_path.is_none() {
-                warn!("save png requested before png was generated");
-                state.status = "Run the conversion before saving PNG.".to_owned();
-                return Task::none();
-            }
-
+        Message::SaveCopperPng => {
+            let src = match &state.generated_pngs {
+                Some(p) => p.copper.path.clone(),
+                None => {
+                    state.status = "Run the conversion before saving PNGs.".to_owned();
+                    return Task::none();
+                }
+            };
             return Task::perform(
-                async {
-                    rfd::FileDialog::new()
+                async move {
+                    let dest = rfd::FileDialog::new()
                         .add_filter("PNG", &["png"])
-                        .set_file_name("output.png")
-                        .set_title("Save rendered PNG")
-                        .save_file()
+                        .set_file_name("traces.png")
+                        .set_title("Save copper traces PNG")
+                        .save_file();
+                    (dest, src)
                 },
                 Message::SavePngPathPicked,
             );
         }
-        Message::SavePngPathPicked(path) => {
-            if let Some(dest) = path {
-                if let Some(src) = &state.generated_png_path {
-                    match fs::copy(src, &dest) {
-                        Ok(_) => {
-                            info!(src = %src, dest = %dest.display(), "saved rendered png");
-                            state.status =
-                                format!("Saved PNG to {}.", path_to_label(dest));
-                        }
-                        Err(err) => {
-                            error!(src = %src, dest = %dest.display(), error = %err, "failed to save png");
-                            state.status = format!("Failed to save PNG: {err}");
-                        }
+        Message::SaveDrillPng => {
+            let src = match &state.generated_pngs {
+                Some(p) => p.drills.path.clone(),
+                None => {
+                    state.status = "Run the conversion before saving PNGs.".to_owned();
+                    return Task::none();
+                }
+            };
+            return Task::perform(
+                async move {
+                    let dest = rfd::FileDialog::new()
+                        .add_filter("PNG", &["png"])
+                        .set_file_name("drills.png")
+                        .set_title("Save drills PNG")
+                        .save_file();
+                    (dest, src)
+                },
+                Message::SavePngPathPicked,
+            );
+        }
+        Message::SaveOutlinePng => {
+            let src = match &state.generated_pngs {
+                Some(p) => p.outline.path.clone(),
+                None => {
+                    state.status = "Run the conversion before saving PNGs.".to_owned();
+                    return Task::none();
+                }
+            };
+            return Task::perform(
+                async move {
+                    let dest = rfd::FileDialog::new()
+                        .add_filter("PNG", &["png"])
+                        .set_file_name("outline.png")
+                        .set_title("Save board outline PNG")
+                        .save_file();
+                    (dest, src)
+                },
+                Message::SavePngPathPicked,
+            );
+        }
+        Message::SaveAllPngs => {
+            let pngs = match &state.generated_pngs {
+                Some(p) => p.clone(),
+                None => {
+                    state.status = "Run the conversion before saving PNGs.".to_owned();
+                    return Task::none();
+                }
+            };
+            return Task::perform(
+                async move {
+                    let dir = rfd::FileDialog::new()
+                        .set_title("Select directory to save all 3 PNGs")
+                        .pick_folder();
+                    (dir, pngs)
+                },
+                Message::SaveAllPngsFinished,
+            );
+        }
+        Message::SaveAllPngsFinished((dir_opt, pngs)) => {
+            if let Some(dir) = dir_opt {
+                for (result, name) in [
+                    (&pngs.copper, "traces.png"),
+                    (&pngs.drills, "drills.png"),
+                    (&pngs.outline, "outline.png"),
+                ] {
+                    let dest = dir.join(name);
+                    if let Err(err) = fs::copy(&result.path, &dest) {
+                        error!("failed to save {name}: {err}");
                     }
-                } else {
-                    warn!("save path selected but generated png was unavailable");
-                    state.status = "No generated PNG available to save.".to_owned();
+                }
+                state.status = format!("Saved 3 PNGs to {}.", dir.display());
+            }
+        }
+        Message::SavePngPathPicked((dest, src)) => {
+            if let Some(dest) = dest {
+                match fs::copy(&src, &dest) {
+                    Ok(_) => {
+                        info!(src = %src.display(), dest = %dest.display(), "saved rendered png");
+                        state.status = format!("Saved PNG to {}.", path_to_label(dest));
+                    }
+                    Err(err) => {
+                        error!(src = %src.display(), dest = %dest.display(), error = %err, "failed to save png");
+                        state.status = format!("Failed to save PNG: {err}");
+                    }
                 }
             } else {
                 state.status = "Save canceled.".to_owned();
             }
         }
         Message::GenerateGcode => {
-            let png_path = state
-                .generated_png_path
-                .clone()
-                .or_else(|| {
-                    state
-                        .loaded_png_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned())
-                });
-
-            let png_path = match png_path {
-                Some(p) => p,
+            let png_path = match &state.loaded_png_path {
+                Some(p) => p.to_string_lossy().into_owned(),
                 None => {
                     warn!("generate gcode requested with no png loaded");
                     state.status = "Generate a PNG or load one first.".to_owned();
@@ -479,12 +539,6 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 info!("gcode save canceled");
                 state.status = "Save canceled.".to_owned();
             }
-        }
-        Message::GerberProgress(p) => {
-            state.gerber_to_png_progress = p;
-        }
-        Message::GcodeProgress(p) => {
-            state.png_to_gcode_progress = p;
         }
         Message::PollProgress => {
             if state.gerber_to_png == StepState::Running {
