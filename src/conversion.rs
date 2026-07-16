@@ -161,7 +161,7 @@ pub fn gerber_inputs_to_png(
             }
             file_count += 1;
             if let Some(ref cb) = on_progress {
-                cb(file_count as f32 / (total_files as f32 * 0.5));
+                cb(file_count as f32 / total_files as f32 * 0.5);
             }
         }
         Ok(())
