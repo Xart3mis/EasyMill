@@ -4,8 +4,8 @@ use easymill::conversion::{
 };
 use easymill::logging::init_logging;
 use iced::{
-    self, Alignment, Element, Length, Subscription, Task, Theme,
-    widget::{column, container, row},
+    self, Element, Length, Subscription, Task, Theme,
+    widget::{column, container, scrollable},
 };
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +16,19 @@ use tokio::task::spawn_blocking;
 use tracing::{error, info, warn};
 
 mod ui;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tab {
+    Source,
+    Settings,
+    Pipeline,
+}
+
+impl Default for Tab {
+    fn default() -> Self {
+        Self::Source
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum StepState {
@@ -38,7 +51,15 @@ impl StepState {
 
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerKind {
+    Copper,
+    Outline,
+    Drill,
+}
+
 pub(crate) struct AppState {
+    pub(crate) active_tab: Tab,
     pub(crate) copper_paths: Vec<PathBuf>,
     pub(crate) outline_paths: Vec<PathBuf>,
     pub(crate) drill_paths: Vec<PathBuf>,
@@ -65,11 +86,16 @@ pub(crate) struct AppState {
     pub(crate) board_dimensions: String,
     pub(crate) png_progress: Arc<AtomicU32>,
     pub(crate) gcode_progress: Arc<AtomicU32>,
+    pub(crate) rasterize_stale: bool,
+    pub(crate) gcode_stale: bool,
+    pub(crate) expanded_step: Option<u8>,
+    pub(crate) settings_groups_open: [bool; 4],
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            active_tab: Tab::default(),
             copper_paths: Vec::new(),
             outline_paths: Vec::new(),
             drill_paths: Vec::new(),
@@ -96,6 +122,10 @@ impl Default for AppState {
             board_dimensions: "0.0 x 0.0 mm".to_owned(),
             png_progress: Arc::new(AtomicU32::new(0)),
             gcode_progress: Arc::new(AtomicU32::new(0)),
+            rasterize_stale: false,
+            gcode_stale: false,
+            expanded_step: Some(1),
+            settings_groups_open: [true, true, false, false],
         }
     }
 }
@@ -120,6 +150,7 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
+    TabChanged(Tab),
     SelectCopperFiles,
     SelectOutlineFiles,
     SelectDrillFiles,
@@ -151,6 +182,12 @@ pub(crate) enum Message {
     ToolDiameterChanged(String),
     OffsetNumberChanged(String),
     OffsetStepoverChanged(String),
+    StepToggled(u8),
+    RemoveFile { layer: LayerKind, index: usize },
+    SettingsGroupToggled(usize),
+    ReRunRasterize,
+    ReRunGcode,
+    RunAll,
 }
 
 fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
@@ -169,6 +206,9 @@ fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
     match message {
+        Message::TabChanged(tab) => {
+            state.active_tab = tab;
+        }
         Message::SelectCopperFiles => {
             return Task::perform(
                 async {
@@ -208,6 +248,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.loaded_inputs = derive_loaded_inputs(state);
                 state.gerber_to_png = StepState::Ready;
                 state.status = "Copper layers loaded.".into();
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
         }
         Message::OutlineFilesPicked(files) => {
@@ -215,6 +257,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.outline_paths = files;
                 state.loaded_inputs = derive_loaded_inputs(state);
                 state.status = "Outline loaded.".into();
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
         }
         Message::DrillFilesPicked(files) => {
@@ -222,6 +266,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.drill_paths = files;
                 state.loaded_inputs = derive_loaded_inputs(state);
                 state.status = "Drills loaded.".into();
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
         }
         Message::LoadPng => {
@@ -238,6 +284,9 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::LoadPngPicked(file) => {
             if let Some(path) = file {
                 state.loaded_png_path = Some(path.clone());
+                state.generated_pngs = None;
+                state.gerber_to_png = StepState::Idle;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.png_to_gcode = StepState::Ready;
                 state.status = "PNG loaded. Ready to generate G-code.".into();
             }
@@ -286,6 +335,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             Ok(layers) => {
                 state.generated_pngs = Some(layers.clone());
                 state.gerber_to_png = StepState::Complete;
+                state.rasterize_stale = false;
                 state.gerber_to_png_progress = 1.0;
                 state.png_progress.store(1000, Ordering::Relaxed);
                 state.png_to_gcode = StepState::Ready;
@@ -452,6 +502,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             Ok(gcode_result) => {
                 state.generated_gcode = Some(gcode_result.gcode);
                 state.png_to_gcode = StepState::Complete;
+                state.gcode_stale = false;
                 state.png_to_gcode_progress = 1.0;
                 state.gcode_progress.store(1000, Ordering::Relaxed);
 
@@ -548,30 +599,95 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::DpiChanged(val) => {
             state.dpi_input = val;
+            state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::CutZChanged(val) => {
             state.cut_z_mm_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::SafeZChanged(val) => {
             state.safe_z_mm_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::FeedRateChanged(val) => {
             state.feed_rate_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::PlungeRateChanged(val) => {
             state.plunge_rate_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::SpindleSpeedChanged(val) => {
             state.spindle_speed_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::ToolDiameterChanged(val) => {
             state.tool_diameter_mm_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::OffsetNumberChanged(val) => {
             state.offset_number_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::OffsetStepoverChanged(val) => {
             state.offset_stepover_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
+        }
+        Message::StepToggled(n) => {
+            state.expanded_step = if state.expanded_step == Some(n) { None } else { Some(n) };
+        }
+        Message::RemoveFile { layer, index } => {
+            match layer {
+                LayerKind::Copper => {
+                    if index < state.copper_paths.len() {
+                        state.copper_paths.remove(index);
+                    }
+                }
+                LayerKind::Outline => {
+                    if index < state.outline_paths.len() {
+                        state.outline_paths.remove(index);
+                    }
+                }
+                LayerKind::Drill => {
+                    if index < state.drill_paths.len() {
+                        state.drill_paths.remove(index);
+                    }
+                }
+            }
+            state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
+            state.loaded_inputs = derive_loaded_inputs(state);
+        }
+        Message::SettingsGroupToggled(i) => {
+            if i < 4 {
+                state.settings_groups_open[i] = !state.settings_groups_open[i];
+            }
+        }
+        Message::ReRunRasterize => {
+            state.rasterize_stale = false;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
+            return update(state, Message::ConvertToPng);
+        }
+        Message::ReRunGcode => {
+            state.gcode_stale = false;
+            return update(state, Message::GenerateGcode);
+        }
+        Message::RunAll => {
+            let has_gerbers = !state.copper_paths.is_empty()
+                || !state.outline_paths.is_empty()
+                || !state.drill_paths.is_empty();
+            let rasterize_needed = has_gerbers
+                && (state.gerber_to_png != StepState::Complete || state.rasterize_stale);
+            let gcode_needed = state.loaded_png_path.is_some()
+                && (state.png_to_gcode != StepState::Complete || state.gcode_stale);
+            if rasterize_needed {
+                state.rasterize_stale = false;
+                return update(state, Message::ConvertToPng);
+            } else if gcode_needed {
+                state.gcode_stale = false;
+                return update(state, Message::GenerateGcode);
+            }
         }
     }
 
@@ -583,35 +699,29 @@ fn theme(_state: &AppState) -> Theme {
 }
 
 fn view(state: &AppState) -> Element<'_, Message> {
-    use ui::{header, source_panel, config_panel, pipeline_panel, stats_panel, status_line};
+    use ui::{header, tab_bar, source_panel, config_panel, pipeline_panel, status_line};
 
-    let left_column = column![source_panel(state), config_panel(state), stats_panel(state)].spacing(16);
+    let content: Element<'_, Message> = match state.active_tab {
+        Tab::Source => scrollable(source_panel(state)).height(Length::Fill).into(),
+        Tab::Settings => scrollable(config_panel(state)).height(Length::Fill).into(),
+        Tab::Pipeline => pipeline_panel(state),
+    };
 
     let shell = column![
         header(),
-        row![
-            container(left_column)
-                .width(Length::FillPortion(5))
-                .height(Length::Fill),
-            container(pipeline_panel(state))
-                .width(Length::FillPortion(5))
-                .height(Length::Fill),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_y(Alignment::Start)
-        .spacing(16),
+        tab_bar(state.active_tab),
+        content,
         status_line(state),
     ]
     .spacing(16)
     .height(Length::Fill)
-    .max_width(1320);
+    .max_width(960);
 
     container(shell)
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
-        .padding([20, 24])
+        .padding([24, 32])
         .style(ui::styles::app_style())
         .into()
 }
