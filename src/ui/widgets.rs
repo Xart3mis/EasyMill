@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use super::palette;
 use super::styles;
+use easymill::conversion::PngRenderResult;
 
 pub fn header<'a>() -> Element<'a, crate::Message> {
     container(
@@ -390,11 +391,8 @@ pub fn pipeline_panel<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
                 step_card("STAGE 02", "PNG -> GCODE", "Toolpath generation", state.png_to_gcode, state.png_to_gcode_progress),
                 generate_btn,
                 generated_output(state),
-                row![
-                    save_png_button(state),
-                    save_gcode_button(state),
-                ]
-                .spacing(10),
+                save_png_buttons(state),
+                save_gcode_button(state),
             ]
             .spacing(12),
         )
@@ -466,16 +464,54 @@ pub fn generated_output<'a>(state: &'a crate::AppState) -> Element<'a, crate::Me
         .color(palette::text_muted());
 
     if let Some(pngs) = &state.generated_pngs {
-        let png_path = &pngs.copper.path;
-        let png_label = path_to_label(png_path.clone());
-        let img_widget = image(iced::widget::image::Handle::from_path(png_path))
-            .width(Length::Fill)
-            .height(Length::Fixed(180.0));
+        let preview = |result: &'a PngRenderResult, label: &'a str| -> Element<'a, crate::Message> {
+            let img_widget = image(iced::widget::image::Handle::from_path(&result.path))
+                .width(Length::FillPortion(1))
+                .height(Length::Fixed(120.0));
+            container(
+                column![
+                    text(label)
+                        .font(palette::MONO)
+                        .size(11)
+                        .color(palette::text_accent()),
+                    container(img_widget)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(120.0))
+                        .clip(true)
+                        .style(styles::inset_style()),
+                ]
+                .spacing(4),
+            )
+            .width(Length::FillPortion(1))
+            .into()
+        };
 
         container(
             column![
                 heading,
-                text(format!("Render: {png_label}"))
+                row![
+                    preview(&pngs.copper, "Traces"),
+                    preview(&pngs.drills, "Drills"),
+                    preview(&pngs.outline, "Outline"),
+                ]
+                .spacing(8)
+                .width(Length::Fill),
+            ]
+            .spacing(8),
+        )
+        .width(Length::Fill)
+        .padding(14)
+        .style(styles::inset_style())
+        .into()
+    } else if state.loaded_png_path.is_some() {
+        let png_path = state.loaded_png_path.as_ref().unwrap();
+        let img_widget = image(iced::widget::image::Handle::from_path(png_path.as_path()))
+            .width(Length::Fill)
+            .height(Length::Fixed(180.0));
+        container(
+            column![
+                heading,
+                text("Loaded external PNG")
                     .font(palette::MONO)
                     .size(12)
                     .color(palette::text_secondary()),
@@ -509,20 +545,50 @@ pub fn generated_output<'a>(state: &'a crate::AppState) -> Element<'a, crate::Me
     }
 }
 
-pub fn save_png_button<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let btn = button(
-        text("Save PNG")
-            .font(palette::mono_bold()).size(14),
+pub fn save_png_buttons<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
+    let has_pngs = state.generated_pngs.is_some();
+
+    let traces_btn = button(
+        text("Save Traces").font(palette::mono_bold()).size(13),
     )
     .style(styles::secondary_action_style)
     .width(Length::Fill)
-    .padding([10, 16]);
+    .padding([8, 12]);
+    let traces_btn = if has_pngs { traces_btn.on_press(crate::Message::SaveCopperPng) } else { traces_btn };
 
-    if state.generated_pngs.is_some() || state.loaded_png_path.is_some() {
-        btn.on_press(crate::Message::SaveCopperPng).into()
-    } else {
-        btn.into()
-    }
+    let drills_btn = button(
+        text("Save Drills").font(palette::mono_bold()).size(13),
+    )
+    .style(styles::secondary_action_style)
+    .width(Length::Fill)
+    .padding([8, 12]);
+    let drills_btn = if has_pngs { drills_btn.on_press(crate::Message::SaveDrillPng) } else { drills_btn };
+
+    let outline_btn = button(
+        text("Save Outline").font(palette::mono_bold()).size(13),
+    )
+    .style(styles::secondary_action_style)
+    .width(Length::Fill)
+    .padding([8, 12]);
+    let outline_btn = if has_pngs { outline_btn.on_press(crate::Message::SaveOutlinePng) } else { outline_btn };
+
+    let save_all_btn = button(
+        text("Save All PNGs").font(palette::mono_bold()).size(14),
+    )
+    .style(styles::primary_action_style)
+    .width(Length::Fill)
+    .padding([10, 16]);
+    let save_all_btn = if has_pngs { save_all_btn.on_press(crate::Message::SaveAllPngs) } else { save_all_btn };
+
+    container(
+        column![
+            row![traces_btn, drills_btn, outline_btn].spacing(8),
+            save_all_btn,
+        ]
+        .spacing(8),
+    )
+    .width(Length::Fill)
+    .into()
 }
 
 pub fn save_gcode_button<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
