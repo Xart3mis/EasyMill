@@ -13,7 +13,6 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 zip = "2.2.2"
 gerber_parser = "0.5"
 gerber-types = "0.7"
-gerber_viewer = { version = "0.7", default-features = false, features = ["types", "egui"] }
 lyon = "1.0"
 nalgebra = "0.34"
 

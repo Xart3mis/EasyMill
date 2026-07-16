@@ -18,6 +18,7 @@ pub struct Shape {
     pub triangles: Vec<Triangle>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum LayerType {
     Copper,
     Profile,
@@ -370,7 +371,6 @@ pub fn tessellate_thick_line(
         center: Point2<f64>,
         nx: f64,
         ny: f64,
-        _radius: f64,
         n: u32,
     ) -> Vec<Point2<f64>> {
         let mut pts = Vec::with_capacity((n + 1) as usize);
@@ -389,7 +389,6 @@ pub fn tessellate_thick_line(
         center: Point2<f64>,
         nx: f64,
         ny: f64,
-        _radius: f64,
         n: u32,
     ) -> Vec<Point2<f64>> {
         let mut pts = Vec::with_capacity((n + 1) as usize);
@@ -405,10 +404,10 @@ pub fn tessellate_thick_line(
     }
 
     let n: u32 = 16;
-    let mut start_cap = half_circle_ccw(start, nx, ny, half, n);
+    let mut start_cap = half_circle_ccw(start, nx, ny, n);
     start_cap.push(Point2::new(start.x + nx, start.y + ny));
 
-    let mut end_cap = half_circle_cw(end, nx, ny, half, n);
+    let mut end_cap = half_circle_cw(end, nx, ny, n);
     end_cap.push(Point2::new(end.x - nx, end.y - ny));
 
     let mut result = body;
