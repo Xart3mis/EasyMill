@@ -1274,7 +1274,6 @@ mod tests {
 
     #[test]
     fn render_triangles_creates_png() {
-        use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let png_path = dir.path().join("render_test.png");
         let tris = tessellate_aperture_circle(Point2::new(10.0, 10.0), 5.0);
