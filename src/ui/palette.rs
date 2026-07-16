@@ -1,0 +1,52 @@
+use iced::Color;
+use iced::Font;
+
+pub const MONO: Font = Font::MONOSPACE;
+
+pub fn mono_bold() -> Font {
+    Font::MONOSPACE
+}
+
+pub fn accent() -> Color {
+    Color::from_rgb(0.49, 0.81, 1.0)
+}
+
+pub fn accent_muted() -> Color {
+    Color::from_rgba(0.49, 0.81, 1.0, 0.15)
+}
+
+pub fn surface_inset() -> Color {
+    Color::from_rgb(0.12, 0.14, 0.21)
+}
+
+pub fn text_primary() -> Color {
+    Color::from_rgb(0.75, 0.79, 0.96)
+}
+
+pub fn text_secondary() -> Color {
+    Color::from_rgb(0.66, 0.69, 0.84)
+}
+
+pub fn text_muted() -> Color {
+    Color::from_rgb(0.34, 0.37, 0.54)
+}
+
+pub fn text_accent() -> Color {
+    accent()
+}
+
+pub fn signal_green() -> Color {
+    Color::from_rgb(0.62, 0.81, 0.42)
+}
+
+pub fn signal_green_muted() -> Color {
+    Color::from_rgba(0.62, 0.81, 0.42, 0.15)
+}
+
+pub fn signal_gold() -> Color {
+    Color::from_rgb(0.88, 0.69, 0.41)
+}
+
+pub fn signal_gold_muted() -> Color {
+    Color::from_rgba(0.88, 0.69, 0.41, 0.15)
+}
