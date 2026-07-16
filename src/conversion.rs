@@ -1,4 +1,5 @@
-use image::{GrayImage, Luma};
+use image::GrayImage;
+use nalgebra::Point2;
 use std::{
     collections::HashMap,
     fs,
@@ -7,6 +8,8 @@ use std::{
 };
 use tracing::{debug, info, warn};
 use zip::ZipArchive;
+
+use crate::gerber;
 
 pub const DEFAULT_DPI: f32 = 1000.0;
 pub const MM_PER_INCH: f32 = 25.4;
@@ -61,6 +64,7 @@ pub enum ConversionError {
     Zip(zip::result::ZipError),
     EmptyInput,
     NoRenderableGerber,
+    GerberParseError(String),
     RenderTooLarge {
         width: u32,
         height: u32,
@@ -77,6 +81,7 @@ impl std::fmt::Display for ConversionError {
             Self::Zip(err) => write!(formatter, "ZIP error: {err}"),
             Self::EmptyInput => write!(formatter, "no input files were provided"),
             Self::NoRenderableGerber => write!(formatter, "no supported Gerber geometry was found"),
+            Self::GerberParseError(err) => write!(formatter, "gerber parse error: {err}"),
             Self::RenderTooLarge {
                 width,
                 height,
@@ -108,43 +113,6 @@ impl From<zip::result::ZipError> for ConversionError {
     fn from(value: zip::result::ZipError) -> Self {
         Self::Zip(value)
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApertureShape {
-    Circle,
-    Rectangle,
-    Oval,
-    Polygon,
-}
-
-#[derive(Debug, Clone)]
-pub enum Primitive {
-    Segment {
-        start: Point,
-        end: Point,
-        diameter_mm: f32,
-    },
-    Flash {
-        center: Point,
-        shape: ApertureShape,
-        dimensions: Vec<f32>,
-    },
-    Polygon {
-        points: Vec<Point>,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct Aperture {
-    shape: ApertureShape,
-    dimensions: Vec<f32>,
 }
 
 pub fn gerber_inputs_to_png(
@@ -181,18 +149,24 @@ pub fn gerber_inputs_to_png(
         }
     }
 
-    let primitives = gerber_sources
-        .iter()
-        .flat_map(|source| parse_gerber_or_drill(source))
-        .collect::<Vec<_>>();
+    let mut triangles = Vec::new();
+    for source in &gerber_sources {
+        if is_excellon(source) {
+            triangles.extend(parse_excellon(source));
+        } else {
+            match gerber::parse_to_shapes(source) {
+                Ok(shapes) => triangles.extend(shapes),
+                Err(e) => {
+                    warn!("gerber parse error (skipping file): {}", e);
+                    continue;
+                }
+            }
+        }
+    }
 
-    info!(
-        source_count = gerber_sources.len(),
-        primitive_count = primitives.len(),
-        "parsed gerber inputs"
-    );
+    info!(triangle_count = triangles.len(), "triangulated all layers");
 
-    let result = render_primitives_to_png(&primitives, output_path, settings)?;
+    let result = gerber::render_triangles_to_png(&triangles, output_path, &settings)?;
     info!(
         output = %result.path.display(),
         width = result.width,
@@ -1016,169 +990,22 @@ fn read_zip_gerbers(path: &Path) -> Result<Vec<String>, ConversionError> {
     Ok(sources)
 }
 
-fn parse_gerber_or_drill(source: &str) -> Vec<Primitive> {
+fn is_excellon(source: &str) -> bool {
     let has_m48 = source.contains("M48");
     let has_metric = source.contains("METRIC");
     let has_inch = source.contains("INCH");
     let asterisks = source.chars().filter(|&c| c == '*').count();
-    
-    if (has_m48 || has_metric || has_inch) && asterisks < 5 {
-        parse_excellon(source)
-    } else {
-        parse_gerber(source)
-    }
+    (has_m48 || has_metric || has_inch) && asterisks < 5
 }
 
-fn parse_gerber(source: &str) -> Vec<Primitive> {
-    let mut format_int = 2usize;
-    let mut format_dec = 4usize;
-    let mut unit_scale = 1.0f32;
-    let mut apertures = HashMap::<u32, Aperture>::new();
-    let mut active_aperture = None::<u32>;
-    let mut current = Point { x: 0.0, y: 0.0 };
-    let mut last_operation = 2u8;
-    let mut primitives = Vec::new();
-    
-    let mut in_region = false;
-    let mut region_points = Vec::new();
 
-    for raw in source.split('*') {
-        // RS-274X extended-code blocks use "%...CMD...*%" syntax.  When two such blocks
-        // appear on consecutive lines (e.g. "%TF...*%\r\n%FSLAX46Y46*%"), splitting the
-        // whole source by '*' yields a chunk like "%\r\n%FSLAX46Y46".  The leading
-        // "%" + whitespace is the closing delimiter of the previous block; strip it so
-        // the actual command content ("%FSLAX46Y46") is recognized correctly.
-        let raw_trimmed = raw.trim();
-        let command = if let Some(rest) = raw_trimmed.strip_prefix('%') {
-            let after_ws = rest.trim_start();
-            if after_ws.starts_with('%') {
-                after_ws   // e.g. "%\r\n%FSLAX46Y46" → "%FSLAX46Y46"
-            } else {
-                raw_trimmed
-            }
-        } else {
-            raw_trimmed
-        };
-        if command.is_empty() {
-            continue;
-        }
 
-        if command.starts_with("%FS") {
-            if let Some((int_digits, dec_digits)) = parse_format(command) {
-                format_int = int_digits;
-                format_dec = dec_digits;
-            }
-            continue;
-        }
-
-        if command.contains("MOIN") {
-            unit_scale = 25.4;
-            continue;
-        }
-
-        if command.contains("MOMM") {
-            unit_scale = 1.0;
-            continue;
-        }
-
-        if command.starts_with("G36") {
-            in_region = true;
-            region_points.clear();
-            continue;
-        }
-        if command.starts_with("G37") {
-            in_region = false;
-            if region_points.len() >= 3 {
-                primitives.push(Primitive::Polygon {
-                    points: region_points.clone(),
-                });
-            }
-            region_points.clear();
-            continue;
-        }
-
-        if let Some((code, aperture)) = parse_aperture(command, unit_scale) {
-            apertures.insert(code, aperture);
-            continue;
-        }
-
-        if let Some(code) = command
-            .strip_prefix('D')
-            .and_then(|value| value.parse::<u32>().ok())
-        {
-            if code >= 10 {
-                active_aperture = Some(code);
-            }
-            continue;
-        }
-
-        if !command.contains('X') && !command.contains('Y') {
-            continue;
-        }
-
-        let operation = parse_operation(command).unwrap_or(last_operation);
-        
-        let next = Point {
-            x: parse_axis(command, 'X', format_int, format_dec)
-                .map(|value| value * unit_scale)
-                .unwrap_or(current.x),
-            y: parse_axis(command, 'Y', format_int, format_dec)
-                .map(|value| value * unit_scale)
-                .unwrap_or(current.y),
-        };
-
-        if in_region {
-            if operation == 1 || operation == 2 {
-                region_points.push(next);
-            }
-        } else {
-            let ap = active_aperture.and_then(|code| apertures.get(&code));
-            let diameter_mm = ap.map(|aperture| {
-                if aperture.shape == ApertureShape::Circle {
-                    aperture.dimensions[0]
-                } else {
-                    aperture.dimensions.iter().cloned().fold(f32::MIN, f32::max)
-                }
-            }).unwrap_or(0.15);
-
-            match operation {
-                1 => primitives.push(Primitive::Segment {
-                    start: current,
-                    end: next,
-                    diameter_mm,
-                }),
-                3 => {
-                    if let Some(aperture) = ap {
-                        primitives.push(Primitive::Flash {
-                            center: next,
-                            shape: aperture.shape,
-                            dimensions: aperture.dimensions.clone(),
-                        });
-                    } else {
-                        primitives.push(Primitive::Flash {
-                            center: next,
-                            shape: ApertureShape::Circle,
-                            dimensions: vec![diameter_mm],
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        current = next;
-        last_operation = operation;
-    }
-
-    primitives
-}
-
-fn parse_excellon(source: &str) -> Vec<Primitive> {
-    let mut unit_scale = 1.0f32; // mm
-    let mut tools = HashMap::<u32, f32>::new();
+fn parse_excellon(source: &str) -> Vec<gerber::Triangle> {
+    let mut unit_scale = 1.0;
+    let mut tools = HashMap::<u32, f64>::new();
     let mut active_tool = None::<u32>;
-    let mut current = Point { x: 0.0, y: 0.0 };
-    let mut primitives = Vec::new();
+    let mut current = Point2::new(0.0, 0.0);
+    let mut triangles = Vec::new();
     let mut in_header = false;
 
     for line in source.lines() {
@@ -1208,12 +1035,12 @@ fn parse_excellon(source: &str) -> Vec<Primitive> {
             if let Some(c_idx) = line.find('C') {
                 let tool_str = &line[1..c_idx];
                 let dia_str = &line[c_idx + 1..];
-                
+
                 let dia_val_str = dia_str.chars()
                     .take_while(|&c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+')
                     .collect::<String>();
 
-                if let (Ok(id), Ok(dia)) = (tool_str.parse::<u32>(), dia_val_str.parse::<f32>()) {
+                if let (Ok(id), Ok(dia)) = (tool_str.parse::<u32>(), dia_val_str.parse::<f64>()) {
                     tools.insert(id, dia * unit_scale);
                 }
             }
@@ -1238,143 +1065,50 @@ fn parse_excellon(source: &str) -> Vec<Primitive> {
         if line.starts_with('X') || line.starts_with('Y') {
             let mut x = None;
             let mut y = None;
-            
+
             let x_idx = line.find('X');
             let y_idx = line.find('Y');
-            
-            let get_val = |sub: &str| -> Option<f32> {
+
+            let get_val = |sub: &str| -> Option<f64> {
                 let val_str = sub.chars()
                     .take_while(|&c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+')
                     .collect::<String>();
                 if val_str.contains('.') {
-                    val_str.parse::<f32>().ok()
+                    val_str.parse::<f64>().ok()
                 } else {
-                    let val = val_str.parse::<f32>().ok()?;
+                    let val = val_str.parse::<f64>().ok()?;
                     let dec = if unit_scale > 2.0 { 10000.0 } else { 1000.0 };
                     Some(val / dec)
                 }
             };
-            
+
             if let Some(idx) = x_idx {
                 x = get_val(&line[idx + 1..]);
             }
             if let Some(idx) = y_idx {
                 y = get_val(&line[idx + 1..]);
             }
-            
-            let next = Point {
-                x: x.map(|v| v * unit_scale).unwrap_or(current.x),
-                y: y.map(|v| v * unit_scale).unwrap_or(current.y),
-            };
+
+            let next = Point2::new(
+                x.map(|v| v * unit_scale).unwrap_or(current.x),
+                y.map(|v| v * unit_scale).unwrap_or(current.y),
+            );
 
             let diameter_mm = active_tool
                 .and_then(|id| tools.get(&id))
                 .cloned()
                 .unwrap_or(0.8);
 
-            primitives.push(Primitive::Flash {
-                center: next,
-                shape: ApertureShape::Circle,
-                dimensions: vec![diameter_mm],
-            });
+            triangles.extend(gerber::tessellate_aperture_circle(next, diameter_mm));
 
             current = next;
         }
     }
 
-    primitives
+    triangles
 }
 
-fn render_primitives_to_png(
-    primitives: &[Primitive],
-    output_path: &Path,
-    settings: ConversionSettings,
-) -> Result<PngRenderResult, ConversionError> {
-    let bounds = primitive_bounds(primitives).ok_or(ConversionError::NoRenderableGerber)?;
-    let margin_mm = 0.82f32; // Matching OUTLINE_EXPORT_PADDING_MM in gerber2png
-    let scale = settings.pixels_per_mm.max(1.0);
-    
-    let board_w = bounds.2 - bounds.0;
-    let board_h = bounds.3 - bounds.1;
-    
-    let width = ((board_w + margin_mm * 2.0) * scale).round() as u32;
-    let height = ((board_h + margin_mm * 2.0) * scale).round() as u32;
-    let width = width.max(1);
-    let height = height.max(1);
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels > settings.max_render_pixels {
-        return Err(ConversionError::RenderTooLarge {
-            width,
-            height,
-            pixels,
-            max_pixels: settings.max_render_pixels,
-        });
-    }
-    
-    // Default background is black (0 represents black, 255 represents white)
-    let mut image = GrayImage::from_pixel(width, height, Luma([0]));
 
-    let to_pixel = |point: Point| -> Point {
-        let x = (point.x - bounds.0 + margin_mm) * scale;
-        let y = (bounds.3 - point.y + margin_mm) * scale;
-        Point { x, y }
-    };
-
-    let draw_color = 255u8;
-
-    for primitive in primitives {
-        match primitive {
-            Primitive::Segment { start, end, diameter_mm } => {
-                let p0 = to_pixel(*start);
-                let p1 = to_pixel(*end);
-                let radius_px = (diameter_mm * scale) / 2.0;
-                draw_thick_line(&mut image, p0, p1, radius_px, draw_color);
-            }
-            Primitive::Flash { center, shape, dimensions } => {
-                let c = to_pixel(*center);
-                match shape {
-                    ApertureShape::Circle => {
-                        let radius_px = (dimensions[0] * scale) / 2.0;
-                        draw_filled_circle(&mut image, c.x, c.y, radius_px, draw_color);
-                    }
-                    ApertureShape::Rectangle => {
-                        let w_px = dimensions[0] * scale;
-                        let h_px = dimensions[1] * scale;
-                        draw_filled_rect(&mut image, c.x, c.y, w_px, h_px, draw_color);
-                    }
-                    ApertureShape::Oval => {
-                        let w_px = dimensions[0] * scale;
-                        let h_px = dimensions[1] * scale;
-                        draw_filled_oval(&mut image, c.x, c.y, w_px, h_px, draw_color);
-                    }
-                    ApertureShape::Polygon => {
-                        let dia_px = dimensions[0] * scale;
-                        let vertices = dimensions.get(1).cloned().unwrap_or(5.0) as usize;
-                        let rotation = dimensions.get(2).cloned().unwrap_or(0.0);
-                        draw_filled_polygon_aperture(&mut image, c.x, c.y, dia_px, vertices, rotation, draw_color);
-                    }
-                }
-            }
-            Primitive::Polygon { points } => {
-                let mapped_points = points.iter().map(|&p| to_pixel(p)).collect::<Vec<_>>();
-                fill_polygon(&mut image, &mapped_points, draw_color);
-            }
-        }
-    }
-
-    let dark_pixels = image
-        .pixels()
-        .filter(|pixel| pixel[0] < settings.threshold)
-        .count();
-    image.save(output_path)?;
-
-    Ok(PngRenderResult {
-        path: output_path.to_path_buf(),
-        width,
-        height,
-        dark_pixels,
-    })
-}
 
 fn raster_to_gcode(image: &GrayImage, settings: ConversionSettings) -> String {
     let mut lines = vec![
@@ -1434,335 +1168,7 @@ fn raster_to_gcode(image: &GrayImage, settings: ConversionSettings) -> String {
     lines.join("\n")
 }
 
-fn primitive_bounds(primitives: &[Primitive]) -> Option<(f32, f32, f32, f32)> {
-    let mut bounds = None::<(f32, f32, f32, f32)>;
-    
-    let update_bounds = |x: f32, y: f32, bounds_ref: &mut Option<(f32, f32, f32, f32)>| {
-        *bounds_ref = Some(match bounds_ref {
-            Some((min_x, min_y, max_x, max_y)) => (
-                min_x.min(x),
-                min_y.min(y),
-                max_x.max(x),
-                max_y.max(y),
-            ),
-            None => (x, y, x, y),
-        });
-    };
 
-    for primitive in primitives {
-        match primitive {
-            Primitive::Segment { start, end, diameter_mm } => {
-                let half_d = diameter_mm / 2.0;
-                update_bounds(start.x - half_d, start.y - half_d, &mut bounds);
-                update_bounds(start.x + half_d, start.y + half_d, &mut bounds);
-                update_bounds(end.x - half_d, end.y - half_d, &mut bounds);
-                update_bounds(end.x + half_d, end.y + half_d, &mut bounds);
-            }
-            Primitive::Flash { center, shape, dimensions } => {
-                match shape {
-                    ApertureShape::Circle => {
-                        let radius = dimensions[0] / 2.0;
-                        update_bounds(center.x - radius, center.y - radius, &mut bounds);
-                        update_bounds(center.x + radius, center.y + radius, &mut bounds);
-                    }
-                    ApertureShape::Rectangle | ApertureShape::Oval => {
-                        let half_w = dimensions[0] / 2.0;
-                        let half_h = dimensions[1] / 2.0;
-                        update_bounds(center.x - half_w, center.y - half_h, &mut bounds);
-                        update_bounds(center.x + half_w, center.y + half_h, &mut bounds);
-                    }
-                    ApertureShape::Polygon => {
-                        let radius = dimensions[0] / 2.0;
-                        update_bounds(center.x - radius, center.y - radius, &mut bounds);
-                        update_bounds(center.x + radius, center.y + radius, &mut bounds);
-                    }
-                }
-            }
-            Primitive::Polygon { points } => {
-                for pt in points {
-                    update_bounds(pt.x, pt.y, &mut bounds);
-                }
-            }
-        }
-    }
-    bounds
-}
-
-fn draw_thick_line(image: &mut GrayImage, p0: Point, p1: Point, radius: f32, color: u8) {
-    let xmin = p0.x.min(p1.x) - radius;
-    let xmax = p0.x.max(p1.x) + radius;
-    let ymin = p0.y.min(p1.y) - radius;
-    let ymax = p0.y.max(p1.y) + radius;
-    
-    let x_start = (xmin.floor() as i32).max(0);
-    let x_end = (xmax.ceil() as i32).min(image.width() as i32 - 1);
-    let y_start = (ymin.floor() as i32).max(0);
-    let y_end = (ymax.ceil() as i32).min(image.height() as i32 - 1);
-    
-    let dx = p1.x - p0.x;
-    let dy = p1.y - p0.y;
-    let len_sq = dx * dx + dy * dy;
-    let radius_sq = radius * radius;
-    
-    for y in y_start..=y_end {
-        let py = y as f32 + 0.5;
-        for x in x_start..=x_end {
-            let px = x as f32 + 0.5;
-            
-            let dpx = px - p0.x;
-            let dpy = py - p0.y;
-            
-            let dist_sq = if len_sq < 1e-6 {
-                dpx * dpx + dpy * dpy
-            } else {
-                let t = (dpx * dx + dpy * dy) / len_sq;
-                let t_clamped = t.max(0.0).min(1.0);
-                let proj_x = p0.x + t_clamped * dx;
-                let proj_y = p0.y + t_clamped * dy;
-                (px - proj_x).powi(2) + (py - proj_y).powi(2)
-            };
-            
-            if dist_sq <= radius_sq {
-                image.put_pixel(x as u32, y as u32, Luma([color]));
-            }
-        }
-    }
-}
-
-fn draw_filled_circle(image: &mut GrayImage, cx: f32, cy: f32, radius: f32, color: u8) {
-    let xmin = cx - radius;
-    let xmax = cx + radius;
-    let ymin = cy - radius;
-    let ymax = cy + radius;
-    
-    let x_start = (xmin.floor() as i32).max(0);
-    let x_end = (xmax.ceil() as i32).min(image.width() as i32 - 1);
-    let y_start = (ymin.floor() as i32).max(0);
-    let y_end = (ymax.ceil() as i32).min(image.height() as i32 - 1);
-    
-    let radius_sq = radius * radius;
-    for y in y_start..=y_end {
-        let dy = y as f32 + 0.5 - cy;
-        for x in x_start..=x_end {
-            let dx = x as f32 + 0.5 - cx;
-            if dx * dx + dy * dy <= radius_sq {
-                image.put_pixel(x as u32, y as u32, Luma([color]));
-            }
-        }
-    }
-}
-
-fn draw_filled_rect(image: &mut GrayImage, cx: f32, cy: f32, width: f32, height: f32, color: u8) {
-    let half_w = width / 2.0;
-    let half_h = height / 2.0;
-    let xmin = cx - half_w;
-    let xmax = cx + half_w;
-    let ymin = cy - half_h;
-    let ymax = cy + half_h;
-    
-    let x_start = (xmin.floor() as i32).max(0);
-    let x_end = (xmax.ceil() as i32).min(image.width() as i32 - 1);
-    let y_start = (ymin.floor() as i32).max(0);
-    let y_end = (ymax.ceil() as i32).min(image.height() as i32 - 1);
-    
-    for y in y_start..=y_end {
-        for x in x_start..=x_end {
-            image.put_pixel(x as u32, y as u32, Luma([color]));
-        }
-    }
-}
-
-fn draw_filled_oval(image: &mut GrayImage, cx: f32, cy: f32, w: f32, h: f32, color: u8) {
-    if w > h {
-        let cap_radius = h / 2.0;
-        let offset = (w - h) / 2.0;
-        let p0 = Point { x: cx - offset, y: cy };
-        let p1 = Point { x: cx + offset, y: cy };
-        draw_thick_line(image, p0, p1, cap_radius, color);
-    } else if h > w {
-        let cap_radius = w / 2.0;
-        let offset = (h - w) / 2.0;
-        let p0 = Point { x: cx, y: cy - offset };
-        let p1 = Point { x: cx, y: cy + offset };
-        draw_thick_line(image, p0, p1, cap_radius, color);
-    } else {
-        draw_filled_circle(image, cx, cy, w / 2.0, color);
-    }
-}
-
-fn draw_filled_polygon_aperture(image: &mut GrayImage, cx: f32, cy: f32, diameter: f32, vertices: usize, rotation_deg: f32, color: u8) {
-    let radius = diameter / 2.0;
-    let mut points = Vec::with_capacity(vertices);
-    let rotation_rad = rotation_deg.to_radians();
-    for i in 0..vertices {
-        let angle = 2.0 * std::f32::consts::PI * (i as f32) / (vertices as f32) + rotation_rad;
-        let px = cx + radius * angle.cos();
-        let py = cy + radius * angle.sin();
-        points.push(Point { x: px, y: py });
-    }
-    fill_polygon(image, &points, color);
-}
-
-fn fill_polygon(image: &mut GrayImage, points: &[Point], color: u8) {
-    if points.len() < 3 {
-        return;
-    }
-    
-    let mut ymin = f32::MAX;
-    let mut ymax = f32::MIN;
-    for pt in points {
-        ymin = ymin.min(pt.y);
-        ymax = ymax.max(pt.y);
-    }
-    
-    let y_start = (ymin.floor() as i32).max(0);
-    let y_end = (ymax.ceil() as i32).min(image.height() as i32 - 1);
-    
-    for y in y_start..=y_end {
-        let mut intersections = Vec::new();
-        let y_f = y as f32 + 0.5;
-        
-        for i in 0..points.len() {
-            let p0 = points[i];
-            let p1 = points[(i + 1) % points.len()];
-            
-            if (p0.y <= y_f && p1.y > y_f) || (p1.y <= y_f && p0.y > y_f) {
-                let t = (y_f - p0.y) / (p1.y - p0.y);
-                let x = p0.x + t * (p1.x - p0.x);
-                intersections.push(x);
-            }
-        }
-        
-        intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        
-        for chunk in intersections.chunks_exact(2) {
-            let x0 = chunk[0].round() as i32;
-            let x1 = chunk[1].round() as i32;
-            
-            let x_start = x0.max(0);
-            let x_end = x1.min(image.width() as i32 - 1);
-            
-            for x in x_start..=x_end {
-                image.put_pixel(x as u32, y as u32, Luma([color]));
-            }
-        }
-    }
-}
-
-fn parse_format(command: &str) -> Option<(usize, usize)> {
-    let index = command.find('X')?;
-    let digits = command[index + 1..]
-        .chars()
-        .filter(|character| character.is_ascii_digit())
-        .take(2)
-        .collect::<String>();
-    let mut chars = digits.chars();
-    Some((
-        chars.next()?.to_digit(10)? as usize,
-        chars.next()?.to_digit(10)? as usize,
-    ))
-}
-
-fn parse_aperture(command: &str, unit_scale: f32) -> Option<(u32, Aperture)> {
-    let value = command
-        .strip_prefix("%ADD")
-        .or_else(|| command.strip_prefix("ADD"))?;
-    let code_end = value.find(|character: char| !character.is_ascii_digit())?;
-    let code = value[..code_end].parse::<u32>().ok()?;
-    
-    let rest = &value[code_end..];
-    if rest.is_empty() {
-        return None;
-    }
-    
-    let shape_char = rest.chars().next()?;
-    let shape = match shape_char {
-        'C' | 'c' => ApertureShape::Circle,
-        'R' | 'r' => ApertureShape::Rectangle,
-        'O' | 'o' => ApertureShape::Oval,
-        'P' | 'p' => ApertureShape::Polygon,
-        _ => return None,
-    };
-    
-    let comma = rest.find(',')?;
-    let dims_str = rest[comma + 1..].trim_end_matches('%');
-    
-    let mut dimensions = Vec::new();
-    for token in dims_str.split(['X', 'x']) {
-        if let Ok(val) = token.parse::<f32>() {
-            dimensions.push(val);
-        }
-    }
-    
-    if dimensions.is_empty() {
-        return None;
-    }
-    
-    // Scale appropriate dimensions
-    let mut dims = dimensions.clone();
-    match shape {
-        ApertureShape::Circle => {
-            dims[0] *= unit_scale;
-        }
-        ApertureShape::Rectangle | ApertureShape::Oval => {
-            for dim in &mut dims {
-                *dim *= unit_scale;
-            }
-        }
-        ApertureShape::Polygon => {
-            dims[0] *= unit_scale;
-        }
-    }
-    
-    Some((
-        code,
-        Aperture {
-            shape,
-            dimensions: dims,
-        },
-    ))
-}
-
-fn parse_operation(command: &str) -> Option<u8> {
-    if command.contains("D01") {
-        Some(1)
-    } else if command.contains("D02") {
-        Some(2)
-    } else if command.contains("D03") {
-        Some(3)
-    } else {
-        None
-    }
-}
-
-fn parse_axis(command: &str, axis: char, int_digits: usize, dec_digits: usize) -> Option<f32> {
-    let start = command.find(axis)? + 1;
-    let value = command[start..]
-        .chars()
-        .take_while(|character| {
-            character.is_ascii_digit() || *character == '-' || *character == '+' || *character == '.'
-        })
-        .collect::<String>();
-    if value.is_empty() {
-        return None;
-    }
-
-    if value.contains('.') {
-        return value.parse::<f32>().ok();
-    }
-
-    let sign = if value.starts_with('-') { -1.0 } else { 1.0 };
-    let digits = value.trim_start_matches(['-', '+']);
-    let padded = if digits.len() < int_digits + dec_digits {
-        format!("{digits:0>width$}", width = int_digits + dec_digits)
-    } else {
-        digits.to_owned()
-    };
-    let whole_len = padded.len().saturating_sub(dec_digits);
-    let whole = padded[..whole_len].parse::<f32>().ok()?;
-    let frac = padded[whole_len..].parse::<f32>().unwrap_or(0.0) / 10f32.powi(dec_digits as i32);
-    Some(sign * (whole + frac))
-}
 
 fn is_zip(path: &Path) -> bool {
     path.extension()
