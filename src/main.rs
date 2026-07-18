@@ -7,6 +7,7 @@ use iced::{
     self, Element, Length, Subscription, Task, Theme,
     widget::{container, scrollable},
 };
+use easymill::stackup::{Stackup, LayerFile, LayerCategory, Side};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,18 +28,8 @@ pub(crate) enum StepState {
 }
 
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LayerKind {
-    Copper,
-    Outline,
-    Drill,
-}
-
 pub(crate) struct AppState {
-    pub(crate) copper_paths: Vec<PathBuf>,
-    pub(crate) outline_paths: Vec<PathBuf>,
-    pub(crate) drill_paths: Vec<PathBuf>,
+    pub(crate) stackup: Stackup,
     pub(crate) loaded_png_path: Option<PathBuf>,
     pub(crate) loaded_inputs: Vec<String>,
     pub(crate) gerber_to_png: StepState,
@@ -71,9 +62,7 @@ pub(crate) struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            copper_paths: Vec::new(),
-            outline_paths: Vec::new(),
-            drill_paths: Vec::new(),
+            stackup: Stackup::new(),
             loaded_png_path: None,
             loaded_inputs: Vec::new(),
             gerber_to_png: StepState::default(),
@@ -131,6 +120,9 @@ pub(crate) enum Message {
     CopperFilesPicked(Option<Vec<PathBuf>>),
     OutlineFilesPicked(Option<Vec<PathBuf>>),
     DrillFilesPicked(Option<Vec<PathBuf>>),
+    SelectGerberFiles,
+    GerberFilesPicked(Option<Vec<PathBuf>>),
+    OverrideLayer { index: usize, category: LayerCategory, side: Side },
     LoadPng,
     LoadPngPicked(Option<PathBuf>),
     ConvertToPng,
@@ -158,7 +150,7 @@ pub(crate) enum Message {
     OffsetStepoverChanged(String),
     ClearPng,
     StepToggled(u8),
-    RemoveFile { layer: LayerKind, index: usize },
+    RemoveFile { index: usize },
     SettingsGroupToggled(usize),
     ReRunRasterize,
     ReRunGcode,
@@ -166,17 +158,11 @@ pub(crate) enum Message {
 }
 
 fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
-    let mut labels = Vec::new();
-    for p in &state.copper_paths {
-        labels.push(format!("[Copper] {}", path_to_label(p.clone())));
-    }
-    for p in &state.outline_paths {
-        labels.push(format!("[Outline] {}", path_to_label(p.clone())));
-    }
-    for p in &state.drill_paths {
-        labels.push(format!("[Drill] {}", path_to_label(p.clone())));
-    }
-    labels
+    state.stackup.layers.iter().map(|layer| {
+        let cat = layer.effective_category();
+        let side = layer.effective_side();
+        format!("[{} + {}] {}", cat.label(), side.label(), layer.filename())
+    }).collect()
 }
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
@@ -185,8 +171,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return Task::perform(
                 async {
                     rfd::FileDialog::new()
-                        .add_filter("Copper", &["gbr", "grb", "gtl", "gbl"])
-                        .set_title("Select Copper Layer files")
+                        .set_title("Select Gerber / Drill files (Copper)")
                         .pick_files()
                 },
                 Message::CopperFilesPicked,
@@ -196,8 +181,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return Task::perform(
                 async {
                     rfd::FileDialog::new()
-                        .add_filter("Board Outline", &["gko", "gbr", "ou"])
-                        .set_title("Select Board Profile / Outline files")
+                        .set_title("Select Gerber / Drill files (Outline)")
                         .pick_files()
                 },
                 Message::OutlineFilesPicked,
@@ -207,8 +191,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return Task::perform(
                 async {
                     rfd::FileDialog::new()
-                        .add_filter("Drill", &["drl", "txt", "xln"])
-                        .set_title("Select Drill files")
+                        .set_title("Select Gerber / Drill files (Drill)")
                         .pick_files()
                 },
                 Message::DrillFilesPicked,
@@ -216,28 +199,42 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::CopperFilesPicked(files) => {
             if let Some(files) = files {
-                state.copper_paths = files;
+                let count = files.len();
+                state.stackup.layers.retain(|l| l.effective_category() != LayerCategory::Copper);
+                for path in files {
+                    state.stackup.layers.push(LayerFile::new(path, LayerCategory::Copper, Side::Top));
+                }
                 state.loaded_inputs = derive_loaded_inputs(state);
                 state.gerber_to_png = StepState::Ready;
-                state.status = "Copper layers loaded.".into();
+                state.status = format!("Copper layers loaded ({count} files).");
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
         }
         Message::OutlineFilesPicked(files) => {
             if let Some(files) = files {
-                state.outline_paths = files;
+                let count = files.len();
+                state.stackup.layers.retain(|l| l.effective_category() != LayerCategory::Outline);
+                for path in files {
+                    state.stackup.layers.push(LayerFile::new(path, LayerCategory::Outline, Side::All));
+                }
                 state.loaded_inputs = derive_loaded_inputs(state);
-                state.status = "Outline loaded.".into();
+                state.gerber_to_png = StepState::Ready;
+                state.status = format!("Outline loaded ({count} files).");
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
         }
         Message::DrillFilesPicked(files) => {
             if let Some(files) = files {
-                state.drill_paths = files;
+                let count = files.len();
+                state.stackup.layers.retain(|l| l.effective_category() != LayerCategory::Drill);
+                for path in files {
+                    state.stackup.layers.push(LayerFile::new(path, LayerCategory::Drill, Side::All));
+                }
                 state.loaded_inputs = derive_loaded_inputs(state);
-                state.status = "Drills loaded.".into();
+                state.gerber_to_png = StepState::Ready;
+                state.status = format!("Drills loaded ({count} files).");
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
@@ -264,9 +261,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             }
         }
         Message::ConvertToPng => {
-            let copper = state.copper_paths.clone();
-            let outline = state.outline_paths.clone();
-            let drill = state.drill_paths.clone();
+            let (copper, outline, drill) = state.stackup.milling_paths();
 
             if copper.is_empty() && outline.is_empty() && drill.is_empty() {
                 warn!("convert to png requested with no inputs loaded");
@@ -615,27 +610,50 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::StepToggled(n) => {
             state.expanded_step = if state.expanded_step == Some(n) { None } else { Some(n) };
         }
-        Message::RemoveFile { layer, index } => {
-            match layer {
-                LayerKind::Copper => {
-                    if index < state.copper_paths.len() {
-                        state.copper_paths.remove(index);
-                    }
+        Message::SelectGerberFiles => {
+            return Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .set_title("Select Gerber or Excellon files")
+                        .pick_files()
+                },
+                Message::GerberFilesPicked,
+            );
+        }
+        Message::GerberFilesPicked(files) => {
+            if let Some(files) = files {
+                let count = files.len();
+                let detector = easymill::stackup::LayerDetector::new();
+                for path in files {
+                    let filename = path.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let (cat, side) = detector.detect(&filename);
+                    state.stackup.layers.push(LayerFile::new(path, cat, side));
                 }
-                LayerKind::Outline => {
-                    if index < state.outline_paths.len() {
-                        state.outline_paths.remove(index);
-                    }
-                }
-                LayerKind::Drill => {
-                    if index < state.drill_paths.len() {
-                        state.drill_paths.remove(index);
-                    }
-                }
+                state.loaded_inputs = derive_loaded_inputs(state);
+                state.gerber_to_png = StepState::Ready;
+                state.status = format!("Added {count} files via auto-detect.");
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
-            state.rasterize_stale = state.gerber_to_png == StepState::Complete;
-            state.gcode_stale = state.png_to_gcode == StepState::Complete;
-            state.loaded_inputs = derive_loaded_inputs(state);
+        }
+        Message::OverrideLayer { index, category, side } => {
+            if let Some(layer) = state.stackup.layers.get_mut(index) {
+                layer.user_category = if layer.auto_category == category { None } else { Some(category) };
+                layer.user_side = if layer.auto_side == side { None } else { Some(side) };
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.loaded_inputs = derive_loaded_inputs(state);
+            }
+        }
+        Message::RemoveFile { index } => {
+            if index < state.stackup.layers.len() {
+                state.stackup.layers.remove(index);
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.loaded_inputs = derive_loaded_inputs(state);
+            }
         }
         Message::SettingsGroupToggled(i) => {
             if i < 4 {
@@ -652,9 +670,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return update(state, Message::GenerateGcode);
         }
         Message::RunAll => {
-            let has_gerbers = !state.copper_paths.is_empty()
-                || !state.outline_paths.is_empty()
-                || !state.drill_paths.is_empty();
+            let (copper, outline, drill) = state.stackup.milling_paths();
+            let has_gerbers = !copper.is_empty() || !outline.is_empty() || !drill.is_empty();
             let rasterize_needed = has_gerbers
                 && (state.gerber_to_png != StepState::Complete || state.rasterize_stale);
             let gcode_needed = state.loaded_png_path.is_some()
