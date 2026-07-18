@@ -18,7 +18,10 @@ use tokio::task::spawn_blocking;
 use tracing::{error, info, warn};
 use webbrowser;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = match option_env!("EASYMILL_RELEASE") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 fn version_file_path() -> Option<PathBuf> {
     let base = dirs::data_dir()?;
