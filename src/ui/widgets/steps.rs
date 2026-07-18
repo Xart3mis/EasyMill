@@ -353,8 +353,9 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
     // --- PNG thumbnails ---
     let thumbnails: Element<'_, crate::Message> = if let Some(pngs) = &state.generated_pngs {
         let thumb = |result: &'a PngRenderResult, label: &'static str| -> Element<'a, crate::Message> {
+            let path = result.path.clone();
             column![
-                text(label).font(palette::MONO).size(10).color(palette::text_accent()),
+                text(label).font(palette::MONO).size(11).color(palette::text_accent()),
                 container(
                     image(iced::widget::image::Handle::from_path(&result.path))
                         .width(Length::Fill)
@@ -364,6 +365,16 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
                 .height(Length::Fixed(100.0))
                 .clip(true)
                 .style(styles::inset_style()),
+                button(
+                    text("↗ Open in mods")
+                        .font(palette::MONO)
+                        .size(11)
+                        .color(palette::text_secondary()),
+                )
+                .style(styles::secondary_action_style)
+                .width(Length::Fill)
+                .padding([5, 8])
+                .on_press(crate::Message::OpenInMods(path)),
             ]
             .spacing(4)
             .width(Length::FillPortion(1))

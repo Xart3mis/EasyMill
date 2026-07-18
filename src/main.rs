@@ -3,6 +3,7 @@ use easymill::conversion::{
     gerber_inputs_to_png, png_to_gcode,
 };
 use easymill::logging::init_logging;
+use webbrowser;
 use iced::{
     self, Element, Length, Subscription, Task, Theme, event,
     widget::{container, scrollable},
@@ -70,6 +71,8 @@ pub(crate) struct AppState {
     pub(crate) gcode_stale: bool,
     pub(crate) expanded_step: Option<u8>,
     pub(crate) settings_groups_open: [bool; 4],
+    pub(crate) mods_server_port: Option<u16>,
+    pub(crate) pending_mods_open: Option<std::path::PathBuf>,
 }
 
 impl Default for AppState {
@@ -110,6 +113,8 @@ impl Default for AppState {
             gcode_stale: false,
             expanded_step: Some(1),
             settings_groups_open: [true, true, false, false],
+            mods_server_port: None,
+            pending_mods_open: None,
         }
     }
 }
@@ -180,11 +185,64 @@ pub(crate) enum Message {
     SetLayerSide { index: usize, side: Side },
     ResetLayerOverride(usize),
     FileDropped(PathBuf),
+    OpenInMods(PathBuf),
+    ModsServerStarted(u16),
     SettingsGroupToggled(usize),
     ReRunRasterize,
     ReRunGcode,
     RunAll,
     ToggleLayerExclude(usize),
+}
+
+async fn start_mods_server() -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind mods server");
+    let port = listener.local_addr().expect("no local addr").port();
+    let render_dir = std::env::temp_dir().join("easymill-render");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else { continue };
+            let dir = render_dir.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let raw_path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let filename = raw_path.trim_start_matches('/');
+                let is_safe = !filename.is_empty()
+                    && !filename.contains("..")
+                    && filename.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+                if !is_safe {
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
+                    return;
+                }
+                match tokio::fs::read(dir.join(filename)).await {
+                    Ok(data) => {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                            data.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(&data).await;
+                    }
+                    Err(_) => {
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").await;
+                    }
+                }
+            });
+        }
+    });
+
+    port
 }
 
 fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
@@ -858,6 +916,36 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.loaded_inputs = derive_loaded_inputs(state);
+            }
+        }
+        Message::OpenInMods(path) => {
+            if let Some(port) = state.mods_server_port {
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let url = format!(
+                    "https://modsproject.org/?program=programs/machines/G-code/mill+2D+PCB&src=http://127.0.0.1:{}/{}",
+                    port, filename
+                );
+                let _ = webbrowser::open(&url);
+            } else {
+                state.pending_mods_open = Some(path);
+                return Task::perform(start_mods_server(), Message::ModsServerStarted);
+            }
+        }
+        Message::ModsServerStarted(port) => {
+            state.mods_server_port = Some(port);
+            if let Some(path) = state.pending_mods_open.take() {
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let url = format!(
+                    "https://modsproject.org/?program=programs/machines/G-code/mill+2D+PCB&src=http://127.0.0.1:{}/{}",
+                    port, filename
+                );
+                let _ = webbrowser::open(&url);
             }
         }
         Message::SettingsGroupToggled(i) => {
