@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerCategory {
@@ -134,6 +136,136 @@ impl Stackup {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct JsonEntry {
+    cad: String,
+    files: Vec<JsonFileEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonFileEntry {
+    name: String,
+    side: Option<String>,
+    #[serde(rename = "type")]
+    layer_type: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct LayerDetector {
+    extension_rules: HashMap<String, (LayerCategory, Side)>,
+    pattern_rules: Vec<(String, LayerCategory, Side)>,
+}
+
+impl LayerDetector {
+    pub fn new() -> Self {
+        let json = include_str!("../gerber-filenames.json");
+        let entries: Vec<JsonEntry> = serde_json::from_str(json).expect("valid gerber-filenames.json");
+        Self::from_entries(&entries)
+    }
+
+    fn from_entries(entries: &[JsonEntry]) -> Self {
+        let mut ext_groups: HashMap<String, Vec<(LayerCategory, Side)>> = HashMap::new();
+        let mut pattern_rules = Vec::new();
+
+        for cad in entries {
+            for file in &cad.files {
+                let Some((cat, side)) = parse_type_side(
+                    file.layer_type.as_deref(),
+                    file.side.as_deref(),
+                ) else {
+                    continue;
+                };
+
+                let dot = file.name.rfind('.');
+                let ext = dot.map(|i| file.name[i+1..].to_lowercase()).unwrap_or_default();
+
+                ext_groups.entry(ext.clone()).or_default().push((cat, side));
+
+                if ext == "gbr" || ext == "ger" || ext == "gpi" || ext == "gko" {
+                    let stem = &file.name[..dot.unwrap_or(file.name.len())];
+                    let pattern = normalize_pattern(stem);
+                    if !pattern.is_empty() {
+                        pattern_rules.push((pattern, cat, side));
+                    }
+                }
+            }
+        }
+
+        let mut extension_rules = HashMap::new();
+        for (ext, pairs) in &ext_groups {
+            if pairs.is_empty() {
+                continue;
+            }
+            let first = pairs[0];
+            if ext == "gbr" || ext == "ger" || ext == "gpi" {
+                continue;
+            }
+            if pairs.iter().all(|p| *p == first) {
+                extension_rules.insert(ext.clone(), first);
+            }
+        }
+
+        pattern_rules.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        Self { extension_rules, pattern_rules }
+    }
+
+    pub fn detect(&self, filename: &str) -> (LayerCategory, Side) {
+        let lc = filename.to_lowercase();
+        let dot = lc.rfind('.');
+        let ext = dot.map(|i| &lc[i+1..]).unwrap_or("");
+        let stem = dot.map(|i| &filename[..i]).unwrap_or(filename);
+
+        if let Some(&result) = self.extension_rules.get(ext) {
+            return result;
+        }
+
+        for (pattern, cat, side) in &self.pattern_rules {
+            if stem.contains(pattern.as_str()) {
+                return (*cat, *side);
+            }
+        }
+
+        (LayerCategory::Unknown, Side::All)
+    }
+}
+
+fn parse_type_side(layer_type: Option<&str>, side: Option<&str>) -> Option<(LayerCategory, Side)> {
+    let cat = match layer_type? {
+        "copper" => LayerCategory::Copper,
+        "soldermask" => LayerCategory::Soldermask,
+        "silkscreen" => LayerCategory::Silkscreen,
+        "solderpaste" => LayerCategory::Solderpaste,
+        "outline" => LayerCategory::Outline,
+        "drill" => LayerCategory::Drill,
+        "drawing" => LayerCategory::Drawing,
+        _ => return None,
+    };
+    let side = match side? {
+        "top" => Side::Top,
+        "bottom" => Side::Bottom,
+        "inner" => Side::Inner(0),
+        "all" => Side::All,
+        _ => return None,
+    };
+    Some((cat, side))
+}
+
+fn normalize_pattern(stem: &str) -> String {
+    let s = stem
+        .trim_start_matches("board")
+        .trim_start_matches('-')
+        .trim_start_matches('.')
+        .trim_start_matches("name")
+        .trim_start_matches('-')
+        .trim_start_matches('.');
+    if s.is_empty() || s == stem {
+        stem.to_owned()
+    } else {
+        s.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +370,140 @@ mod tests {
         assert!(copper.is_empty());
         assert!(outline.is_empty());
         assert!(drill.is_empty());
+    }
+
+    #[test]
+    fn test_detect_known_extension() {
+        let entries = vec![JsonEntry {
+            cad: "test".into(),
+            files: vec![
+                JsonFileEntry {
+                    name: "test.gtl".into(),
+                    side: Some("top".into()),
+                    layer_type: Some("copper".into()),
+                },
+            ],
+        }];
+        let detector = LayerDetector::from_entries(&entries);
+        let (cat, side) = detector.detect("board.gtl");
+        assert_eq!(cat, LayerCategory::Copper);
+        assert_eq!(side, Side::Top);
+    }
+
+    #[test]
+    fn test_detect_drill_extensions() {
+        let entries = vec![JsonEntry {
+            cad: "test".into(),
+            files: vec![
+                JsonFileEntry {
+                    name: "board.drl".into(),
+                    side: Some("all".into()),
+                    layer_type: Some("drill".into()),
+                },
+                JsonFileEntry {
+                    name: "board.xln".into(),
+                    side: Some("all".into()),
+                    layer_type: Some("drill".into()),
+                },
+            ],
+        }];
+        let detector = LayerDetector::from_entries(&entries);
+        assert_eq!(detector.detect("test.drl"), (LayerCategory::Drill, Side::All));
+        assert_eq!(detector.detect("test.xln"), (LayerCategory::Drill, Side::All));
+    }
+
+    #[test]
+    fn test_detect_unknown_extension() {
+        let entries = vec![JsonEntry {
+            cad: "test".into(),
+            files: vec![
+                JsonFileEntry {
+                    name: "test.drl".into(),
+                    side: Some("all".into()),
+                    layer_type: Some("drill".into()),
+                },
+            ],
+        }];
+        let detector = LayerDetector::from_entries(&entries);
+        let (cat, side) = detector.detect("test.xyz");
+        assert_eq!(cat, LayerCategory::Unknown);
+        assert_eq!(side, Side::All);
+    }
+
+    #[test]
+    fn test_detect_skip_null_fields() {
+        let entries = vec![JsonEntry {
+            cad: "test".into(),
+            files: vec![
+                JsonFileEntry {
+                    name: "pnp_bom.txt".into(),
+                    side: None,
+                    layer_type: None,
+                },
+                JsonFileEntry {
+                    name: "board.drl".into(),
+                    side: Some("all".into()),
+                    layer_type: Some("drill".into()),
+                },
+            ],
+        }];
+        let detector = LayerDetector::from_entries(&entries);
+        let mut ext_rule_found = false;
+        for ext in detector.extension_rules.keys() {
+            if ext == "txt" {
+                ext_rule_found = true;
+            }
+        }
+        assert!(!ext_rule_found, ".txt should not get an extension rule");
+        assert_eq!(detector.detect("board.drl"), (LayerCategory::Drill, Side::All));
+    }
+
+    #[test]
+    fn test_detect_gbr_via_pattern() {
+        let entries = vec![JsonEntry {
+            cad: "kicad".into(),
+            files: vec![
+                JsonFileEntry {
+                    name: "board-F_Cu.gbr".into(),
+                    side: Some("top".into()),
+                    layer_type: Some("copper".into()),
+                },
+                JsonFileEntry {
+                    name: "board-Edge_Cuts.gbr".into(),
+                    side: Some("all".into()),
+                    layer_type: Some("outline".into()),
+                },
+            ],
+        }];
+        let detector = LayerDetector::from_entries(&entries);
+        assert_eq!(
+            detector.detect("my_board-F_Cu.gbr"),
+            (LayerCategory::Copper, Side::Top)
+        );
+        assert_eq!(
+            detector.detect("my_board-Edge_Cuts.gbr"),
+            (LayerCategory::Outline, Side::All)
+        );
+    }
+
+    #[test]
+    fn test_detect_extension_rule_preferred_over_pattern() {
+        let entries = vec![
+            JsonEntry {
+                cad: "kicad".into(),
+                files: vec![
+                    JsonFileEntry {
+                        name: "board.drl".into(),
+                        side: Some("all".into()),
+                        layer_type: Some("drill".into()),
+                    },
+                ],
+            },
+        ];
+        let detector = LayerDetector::from_entries(&entries);
+        assert_eq!(
+            detector.detect("F_Cu.drl"),
+            (LayerCategory::Drill, Side::All)
+        );
     }
 }
