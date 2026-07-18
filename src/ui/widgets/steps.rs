@@ -175,11 +175,11 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
     let mut file_rows: Vec<Element<'_, crate::Message>> = Vec::new();
     for (i, layer) in state.stackup.layers.iter().enumerate() {
         let cat = layer.effective_category();
-        let label = format!("{} + {}", cat.label(), layer.effective_side().label());
-        let color = palette::layer_category_color(&cat);
+        let side = layer.effective_side();
+        let is_overridden = layer.user_category.is_some() || layer.user_side.is_some();
         let name = layer.filename();
-        file_rows.push(layer_row(label, color, name,
-            crate::Message::RemoveFile { index: i }));
+        let is_editing = state.editing_layer == Some(i);
+        file_rows.push(layer_row(i, cat, side, is_overridden, name, is_editing));
     }
     if is_skipped {
         let name = state.loaded_png_path.as_ref()
@@ -187,8 +187,23 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
             .and_then(|n| n.to_str())
             .unwrap_or("?")
             .to_string();
-        file_rows.push(layer_row("PNG".to_string(), palette::signal_green(), name,
-            crate::Message::ClearPng));
+        file_rows.push(
+            row![
+                text("PNG").font(palette::MONO).size(11).color(palette::signal_green()),
+                text(name)
+                    .font(palette::MONO)
+                    .size(13)
+                    .color(palette::text_secondary())
+                    .width(Length::Fill),
+                button(text("✕").font(palette::MONO).size(11).color(palette::text_muted()))
+                    .style(styles::transparent_button_style)
+                    .padding([2, 6])
+                    .on_press(crate::Message::ClearPng),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+        );
     }
 
     let files_col = iced::widget::Column::with_children(file_rows).spacing(6);

@@ -30,6 +30,7 @@ pub(crate) enum StepState {
 
 pub(crate) struct AppState {
     pub(crate) stackup: Stackup,
+    pub(crate) editing_layer: Option<usize>,
     pub(crate) loaded_png_path: Option<PathBuf>,
     pub(crate) loaded_inputs: Vec<String>,
     pub(crate) gerber_to_png: StepState,
@@ -63,6 +64,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             stackup: Stackup::new(),
+            editing_layer: None,
             loaded_png_path: None,
             loaded_inputs: Vec::new(),
             gerber_to_png: StepState::default(),
@@ -151,6 +153,10 @@ pub(crate) enum Message {
     ClearPng,
     StepToggled(u8),
     RemoveFile { index: usize },
+    EditLayerToggle(usize),
+    SetLayerCategory { index: usize, category: LayerCategory },
+    SetLayerSide { index: usize, side: Side },
+    ResetLayerOverride(usize),
     FileDropped(PathBuf),
     SettingsGroupToggled(usize),
     ReRunRasterize,
@@ -664,6 +670,39 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::RemoveFile { index } => {
             if index < state.stackup.layers.len() {
                 state.stackup.layers.remove(index);
+                state.editing_layer = match state.editing_layer {
+                    Some(i) if i == index => None,
+                    Some(i) if i > index => Some(i - 1),
+                    other => other,
+                };
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.loaded_inputs = derive_loaded_inputs(state);
+            }
+        }
+        Message::EditLayerToggle(i) => {
+            state.editing_layer = if state.editing_layer == Some(i) { None } else { Some(i) };
+        }
+        Message::SetLayerCategory { index, category } => {
+            if let Some(layer) = state.stackup.layers.get_mut(index) {
+                layer.user_category = if layer.auto_category == category { None } else { Some(category) };
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.loaded_inputs = derive_loaded_inputs(state);
+            }
+        }
+        Message::SetLayerSide { index, side } => {
+            if let Some(layer) = state.stackup.layers.get_mut(index) {
+                layer.user_side = if layer.auto_side == side { None } else { Some(side) };
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.loaded_inputs = derive_loaded_inputs(state);
+            }
+        }
+        Message::ResetLayerOverride(index) => {
+            if let Some(layer) = state.stackup.layers.get_mut(index) {
+                layer.user_category = None;
+                layer.user_side = None;
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.loaded_inputs = derive_loaded_inputs(state);
