@@ -1,6 +1,6 @@
 use iced::{
     Alignment, Color, Element, Length, Theme,
-    widget::{button, column, container, row, text},
+    widget::{button, column, container, row, text, Id},
 };
 use crate::StepState;
 use crate::ui::{palette, styles};
@@ -142,7 +142,7 @@ pub fn sidebar<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
             nav4,
             container("").height(Length::Fill),
             make_divider(),
-            run_btn,
+            container(run_btn).id(Id::new("run-all")),
             make_divider(),
             status_row,
         ]

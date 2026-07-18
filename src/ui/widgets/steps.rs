@@ -1,6 +1,6 @@
 use iced::{
     Alignment, Color, Element, Length, Theme,
-    widget::{button, column, container, image, progress_bar, row, text},
+    widget::{button, column, container, image, progress_bar, row, text, Id},
 };
 use easymill::conversion::PngRenderResult;
 use crate::StepState;
@@ -133,11 +133,11 @@ pub(crate) fn step_shell<'a>(
 pub fn step_canvas<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
     container(
         column![
-            files_step(state),
-            settings_step(state),
-            rasterize_step(state),
+            container(files_step(state)).id(Id::new("step-1")),
+            container(settings_step(state)).id(Id::new("step-2")),
+            container(rasterize_step(state)).id(Id::new("step-3")),
             // TODO: unhide when G-code is ready
-            // gcode_step(state),
+            // container(gcode_step(state)).id(Id::new("step-4")),
         ]
         .spacing(20)
         .max_width(720),
