@@ -5,7 +5,7 @@ use easymill::conversion::{
 use easymill::logging::init_logging;
 use iced::{
     self, Element, Length, Subscription, Task, Theme,
-    widget::{column, container, scrollable},
+    widget::{container, scrollable},
 };
 use std::fs;
 use std::path::PathBuf;
@@ -17,19 +17,6 @@ use tracing::{error, info, warn};
 
 mod ui;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tab {
-    Source,
-    Settings,
-    Pipeline,
-}
-
-impl Default for Tab {
-    fn default() -> Self {
-        Self::Source
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum StepState {
     #[default]
@@ -39,17 +26,7 @@ pub(crate) enum StepState {
     Complete,
 }
 
-impl StepState {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "WAITING",
-            Self::Ready => "READY",
-            Self::Running => "RUNNING",
-            Self::Complete => "DONE",
-        }
-    }
 
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayerKind {
@@ -59,7 +36,6 @@ pub(crate) enum LayerKind {
 }
 
 pub(crate) struct AppState {
-    pub(crate) active_tab: Tab,
     pub(crate) copper_paths: Vec<PathBuf>,
     pub(crate) outline_paths: Vec<PathBuf>,
     pub(crate) drill_paths: Vec<PathBuf>,
@@ -95,7 +71,6 @@ pub(crate) struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            active_tab: Tab::default(),
             copper_paths: Vec::new(),
             outline_paths: Vec::new(),
             drill_paths: Vec::new(),
@@ -150,7 +125,6 @@ impl AppState {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
-    TabChanged(Tab),
     SelectCopperFiles,
     SelectOutlineFiles,
     SelectDrillFiles,
@@ -207,9 +181,6 @@ fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
     match message {
-        Message::TabChanged(tab) => {
-            state.active_tab = tab;
-        }
         Message::SelectCopperFiles => {
             return Task::perform(
                 async {

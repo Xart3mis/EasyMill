@@ -1,5 +1,5 @@
 use iced::{
-    Alignment, Color, Element, Length, Theme,
+    Alignment, Color, Element, Length,
     widget::{button, column, container, row, text, text_input},
 };
 use crate::ui::{palette, styles};

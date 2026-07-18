@@ -498,13 +498,117 @@ pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
     };
 
     let summary = match state.png_to_gcode {
-        StepState::Complete => "G-code ready".to_owned(),
+        StepState::Complete => {
+            format!("board.nc · est. {}", state.estimated_time)
+        }
         _ => "Not yet run".to_owned(),
     };
 
     let is_expanded = state.expanded_step == Some(4);
-    step_shell(
-        4, "G-CODE", vs, is_expanded, summary, None,
-        text("(gcode content — Task 10)").font(palette::MONO).size(13).color(palette::text_muted()).into(),
-    )
+
+    // Header run button
+    let can_run = has_png && state.png_to_gcode != StepState::Running;
+    let run_msg = if state.gcode_stale {
+        crate::Message::ReRunGcode
+    } else {
+        crate::Message::GenerateGcode
+    };
+    let run_btn: Element<'_, crate::Message> = if can_run {
+        button(text("▶  Run").font(palette::mono_bold()).size(12))
+            .style(styles::primary_action_style)
+            .padding([5, 12])
+            .on_press(run_msg)
+            .into()
+    } else {
+        button(text("▶  Run").font(palette::MONO).size(12))
+            .style(styles::primary_action_style)
+            .padding([5, 12])
+            .into()
+    };
+
+    // Progress bar
+    let bar_color = if state.png_to_gcode == StepState::Complete { palette::signal_green() } else { palette::accent() };
+    let progress = progress_bar(0.0..=1.0, state.png_to_gcode_progress)
+        .style(move |_| iced::widget::progress_bar::Style {
+            background: palette::surface_inset().into(),
+            bar: bar_color.into(),
+            border: iced::Border::default(),
+        });
+
+    // Wrap progress bar in a container for width/height (iced 0.14 limitation)
+    let progress = container(progress)
+        .width(Length::Fill)
+        .height(Length::Fixed(6.0));
+
+    // Stats card
+    let stats: Element<'_, crate::Message> = if state.png_to_gcode == StepState::Complete {
+        container(
+            column![
+                row![
+                    text("Est. cut time").font(palette::MONO).size(13).color(palette::text_secondary()),
+                    container("").width(Length::Fill),
+                    text(&state.estimated_time).font(palette::MONO).size(13).color(palette::text_primary()),
+                ],
+                row![
+                    text("Cut distance").font(palette::MONO).size(13).color(palette::text_secondary()),
+                    container("").width(Length::Fill),
+                    text(&state.cut_distance).font(palette::MONO).size(13).color(palette::text_primary()),
+                ],
+                row![
+                    text("Board size").font(palette::MONO).size(13).color(palette::text_secondary()),
+                    container("").width(Length::Fill),
+                    text(&state.board_dimensions).font(palette::MONO).size(13).color(palette::text_primary()),
+                ],
+            ]
+            .spacing(8),
+        )
+        .width(Length::Fill)
+        .padding(12)
+        .style(styles::inset_style())
+        .into()
+    } else {
+        container("").into()
+    };
+
+    // Save button
+    let save_btn: Element<'_, crate::Message> = if state.generated_gcode.is_some() {
+        button(text("↓  Save G-code").font(palette::mono_bold()).size(13))
+            .style(styles::primary_action_style)
+            .width(Length::Fill)
+            .padding([10, 14])
+            .on_press(crate::Message::SaveGcode)
+            .into()
+    } else {
+        container("").into()
+    };
+
+    // Stale warning
+    let stale_warning: Element<'_, crate::Message> = if state.gcode_stale {
+        container(
+            row![
+                text("⚠  Settings changed — G-code outdated")
+                    .font(palette::MONO)
+                    .size(12)
+                    .color(palette::signal_gold())
+                    .width(Length::Fill),
+                button(text("↻  Re-run").font(palette::mono_bold()).size(12))
+                    .style(styles::secondary_action_style)
+                    .padding([5, 10])
+                    .on_press(crate::Message::ReRunGcode),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([8, 12])
+        .style(|_: &Theme| container::Style::default()
+            .background(iced::Background::Color(palette::card_stale_bg()))
+            .border(iced::border::rounded(6.0).color(palette::signal_gold()).width(1.0)))
+        .into()
+    } else {
+        container("").into()
+    };
+
+    let content = column![stale_warning, progress, stats, save_btn].spacing(12);
+
+    step_shell(4, "G-CODE", vs, is_expanded, summary, Some(run_btn), content.into())
 }
