@@ -259,7 +259,9 @@ fn normalize_pattern(stem: &str) -> String {
         .trim_start_matches("name")
         .trim_start_matches('-')
         .trim_start_matches('.');
-    if s.is_empty() || s == stem {
+    if s.is_empty() {
+        String::new()
+    } else if s == stem {
         stem.to_owned()
     } else {
         s.to_owned()
@@ -370,6 +372,34 @@ mod tests {
         assert!(copper.is_empty());
         assert!(outline.is_empty());
         assert!(drill.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_pattern_strips_board() {
+        assert_eq!(normalize_pattern("board-F_Cu"), "F_Cu");
+        assert_eq!(normalize_pattern("board-Edge_Cuts"), "Edge_Cuts");
+    }
+
+    #[test]
+    fn test_normalize_pattern_strips_board_name() {
+        assert_eq!(normalize_pattern("board-name.toplayer"), "toplayer");
+    }
+
+    #[test]
+    fn test_normalize_pattern_returns_empty_for_plain_board() {
+        let result = normalize_pattern("board");
+        assert!(result.is_empty(), "plain 'board' stem should produce empty pattern, got '{result}'");
+    }
+
+    #[test]
+    fn test_normalize_pattern_preserves_inner_prefix() {
+        let result = normalize_pattern("Inner1.Cu");
+        assert_eq!(result, "Inner1.Cu");
+    }
+
+    #[test]
+    fn test_normalize_pattern_strips_dotted_prefix() {
+        assert_eq!(normalize_pattern("board.bottom.gbr"), "bottom.gbr");
     }
 
     #[test]
