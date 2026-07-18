@@ -1,7 +1,8 @@
 use iced::{
     Alignment, Color, Element, Length, Theme,
-    widget::{button, column, container, progress_bar, row, text},
+    widget::{button, column, container, image, progress_bar, row, text},
 };
+use easymill::conversion::PngRenderResult;
 use crate::StepState;
 use crate::ui::{palette, styles};
 use super::components::{accordion, drop_zone, layer_row, setting_field};
@@ -314,16 +315,173 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
         }
     };
 
-    let summary = match state.gerber_to_png {
-        StepState::Complete => "3 layers rendered".to_owned(),
-        _ => if is_skipped { "Skipped — PNG loaded directly".to_owned() } else { "Not yet run".to_owned() },
+    let summary = if is_skipped {
+        "Skipped — PNG loaded directly".to_owned()
+    } else {
+        match state.gerber_to_png {
+            StepState::Complete => "3 layers rendered".to_owned(),
+            _ => "Not yet run".to_owned(),
+        }
     };
 
     let is_expanded = state.expanded_step == Some(3);
-    step_shell(
-        3, "RASTERIZE", vs, is_expanded, summary, None,
-        text("(rasterize content — Task 9)").font(palette::MONO).size(13).color(palette::text_muted()).into(),
-    )
+
+    // --- Run / Re-run button (goes in header) ---
+    let can_run = has_gerbers && state.gerber_to_png != StepState::Running;
+    let run_msg = if state.rasterize_stale {
+        crate::Message::ReRunRasterize
+    } else {
+        crate::Message::ConvertToPng
+    };
+    let run_btn: Element<'_, crate::Message> = if can_run {
+        button(text("▶  Run").font(palette::mono_bold()).size(12))
+            .style(styles::primary_action_style)
+            .padding([5, 12])
+            .on_press(run_msg)
+            .into()
+    } else {
+        button(text("▶  Run").font(palette::MONO).size(12))
+            .style(styles::primary_action_style)
+            .padding([5, 12])
+            .into()
+    };
+
+    // --- Per-layer progress rows ---
+    let layer_progress = |label: &'a str, progress: f32| -> Element<'a, crate::Message> {
+        let bar_color = if progress >= 1.0 { palette::signal_green() } else { palette::accent() };
+        row![
+            container(text(label).font(palette::MONO).size(12).color(palette::text_secondary()))
+                .width(Length::Fixed(40.0)),
+            container(
+                progress_bar(0.0..=1.0, progress)
+                    .style(move |_| iced::widget::progress_bar::Style {
+                        background: palette::surface_inset().into(),
+                        bar: bar_color.into(),
+                        border: iced::Border::default(),
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(6.0)),
+            text(format!("{:.0}%", progress * 100.0))
+                .font(palette::MONO)
+                .size(11)
+                .color(palette::text_muted())
+                .width(Length::Fixed(36.0)),
+            text(if progress >= 1.0 { "✓" } else if progress > 0.0 { "···" } else { "" })
+                .font(palette::MONO)
+                .size(11)
+                .color(if progress >= 1.0 { palette::signal_green() } else { palette::text_muted() }),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    };
+
+    let p = state.gerber_to_png_progress;
+    let progress_rows = column![
+        layer_progress("Cu", if state.gerber_to_png == StepState::Complete { 1.0 } else { p }),
+        layer_progress("Out", if state.gerber_to_png == StepState::Complete { 1.0 } else { (p - 0.33).max(0.0) }),
+        layer_progress("Drl", if state.gerber_to_png == StepState::Complete { 1.0 } else { (p - 0.66).max(0.0) }),
+    ]
+    .spacing(8);
+
+    // --- PNG thumbnails ---
+    let thumbnails: Element<'_, crate::Message> = if let Some(pngs) = &state.generated_pngs {
+        let thumb = |result: &'a PngRenderResult, label: &'static str| -> Element<'a, crate::Message> {
+            column![
+                text(label).font(palette::MONO).size(10).color(palette::text_accent()),
+                container(
+                    image(iced::widget::image::Handle::from_path(&result.path))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(100.0)),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(100.0))
+                .clip(true)
+                .style(styles::inset_style()),
+            ]
+            .spacing(4)
+            .width(Length::FillPortion(1))
+            .into()
+        };
+        row![
+            thumb(&pngs.copper, "Traces"),
+            thumb(&pngs.drills, "Drills"),
+            thumb(&pngs.outline, "Outline"),
+        ]
+        .spacing(8)
+        .into()
+    } else {
+        container("").into()
+    };
+
+    // --- Save buttons (shown only when PNGs exist) ---
+    let save_btns: Element<'_, crate::Message> = if state.generated_pngs.is_some() {
+        row![
+            button(text("↓ Traces").font(palette::MONO).size(12))
+                .style(styles::secondary_action_style)
+                .width(Length::FillPortion(1))
+                .padding([7, 10])
+                .on_press(crate::Message::SaveCopperPng),
+            button(text("↓ Drills").font(palette::MONO).size(12))
+                .style(styles::secondary_action_style)
+                .width(Length::FillPortion(1))
+                .padding([7, 10])
+                .on_press(crate::Message::SaveDrillPng),
+            button(text("↓ Outline").font(palette::MONO).size(12))
+                .style(styles::secondary_action_style)
+                .width(Length::FillPortion(1))
+                .padding([7, 10])
+                .on_press(crate::Message::SaveOutlinePng),
+            button(text("↓ Save All").font(palette::mono_bold()).size(12))
+                .style(styles::primary_action_style)
+                .width(Length::FillPortion(1))
+                .padding([7, 10])
+                .on_press(crate::Message::SaveAllPngs),
+        ]
+        .spacing(8)
+        .into()
+    } else {
+        container("").into()
+    };
+
+    // --- Stale warning row ---
+    let stale_warning: Element<'_, crate::Message> = if state.rasterize_stale {
+        container(
+            row![
+                text("⚠  Input changed — results outdated")
+                    .font(palette::MONO)
+                    .size(12)
+                    .color(palette::signal_gold())
+                    .width(Length::Fill),
+                button(text("↻  Re-run").font(palette::mono_bold()).size(12))
+                    .style(styles::secondary_action_style)
+                    .padding([5, 10])
+                    .on_press(crate::Message::ReRunRasterize),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([8, 12])
+        .style(|_: &Theme| container::Style::default()
+            .background(iced::Background::Color(palette::card_stale_bg()))
+            .border(iced::border::rounded(6.0).color(palette::signal_gold()).width(1.0)))
+        .into()
+    } else {
+        container("").into()
+    };
+
+    let content = column![
+        stale_warning,
+        progress_rows,
+        thumbnails,
+        save_btns,
+    ]
+    .spacing(12);
+
+    step_shell(3, "RASTERIZE", vs, is_expanded, summary,
+        if !is_skipped { Some(run_btn) } else { None },
+        content.into())
 }
 
 pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
