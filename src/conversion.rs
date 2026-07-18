@@ -31,6 +31,7 @@ pub struct ConversionSettings {
     pub offset_number: u32,
     pub offset_stepover: f32,
     pub mirror_bottom: bool,
+    pub mirror_top: bool,
 }
 
 impl Default for ConversionSettings {
@@ -48,6 +49,7 @@ impl Default for ConversionSettings {
             offset_number: 4,
             offset_stepover: 0.5,
             mirror_bottom: true,
+            mirror_top: false,
         }
     }
 }
@@ -230,7 +232,7 @@ pub fn gerber_inputs_to_png(
         })
     };
 
-    let copper_top = render_layer(&all_tagged, gerber::LayerType::CopperTop, "_traces_top.png", false, false, false, 0.60)?;
+    let copper_top = render_layer(&all_tagged, gerber::LayerType::CopperTop, "_traces_top.png", false, false, settings.mirror_top, 0.60)?;
     let copper_bottom = render_layer(&all_tagged, gerber::LayerType::CopperBottom, "_traces_bot.png", false, false, settings.mirror_bottom, 0.70)?;
     let drills = render_layer(&all_tagged, gerber::LayerType::Drill, "_drills.png", true, false, false, 0.85)?;
     let outline = render_layer(&all_tagged, gerber::LayerType::Profile, "_outline.png", false, true, false, 0.95)?;

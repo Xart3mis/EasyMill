@@ -48,6 +48,7 @@ pub(crate) struct AppState {
     pub(crate) active_gcode_side: GcodeSide,
     pub(crate) gcode_side_indicator: String,
     pub(crate) mirror_bottom: bool,
+    pub(crate) mirror_top: bool,
     pub(crate) gerber_to_png_progress: f32,
     pub(crate) png_to_gcode_progress: f32,
     pub(crate) status: String,
@@ -87,6 +88,7 @@ impl Default for AppState {
             active_gcode_side: GcodeSide::Top,
             gcode_side_indicator: "Top".to_owned(),
             mirror_bottom: true,
+            mirror_top: false,
             gerber_to_png_progress: 0.0,
             png_to_gcode_progress: 0.0,
             status: String::new(),
@@ -127,6 +129,7 @@ impl AppState {
         settings.offset_number = self.offset_number_input.parse::<u32>().unwrap_or(4);
         settings.offset_stepover = self.offset_stepover_input.parse::<f32>().unwrap_or(0.5);
         settings.mirror_bottom = self.mirror_bottom;
+        settings.mirror_top = self.mirror_top;
         settings
     }
 }
@@ -157,6 +160,7 @@ pub(crate) enum Message {
     GcodeSavePathPicked(Option<PathBuf>),
     SwitchGcodeSide(GcodeSide),
     MirrorBottomToggled(bool),
+    MirrorTopToggled(bool),
     PollProgress,
     Reset,
     DpiChanged(String),
@@ -684,6 +688,11 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::MirrorBottomToggled(val) => {
             state.mirror_bottom = val;
+            state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
+        }
+        Message::MirrorTopToggled(val) => {
+            state.mirror_top = val;
             state.rasterize_stale = state.gerber_to_png == StepState::Complete;
             state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }

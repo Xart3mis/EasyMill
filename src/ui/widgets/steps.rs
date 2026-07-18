@@ -230,7 +230,7 @@ pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messa
         "{}dpi · mirror bot={} top={}",
         state.dpi_input,
         if state.mirror_bottom { "on" } else { "off" },
-        if state.mirror_bottom { "off" } else { "off" },
+        if state.mirror_top { "on" } else { "off" },
     );
 
     let content = column![
@@ -243,7 +243,14 @@ pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messa
         .padding([8, 14])
         .width(Length::Fill)
         .on_press(crate::Message::MirrorBottomToggled(!state.mirror_bottom)),
-        // Mirror top placeholder — wired in Task 2
+        button(
+            text(if state.mirror_top { "☑ Mirror top traces" } else { "☐ Mirror top traces" })
+                .font(palette::MONO).size(12).color(palette::text_secondary()),
+        )
+        .style(styles::ghost_action_style)
+        .padding([8, 14])
+        .width(Length::Fill)
+        .on_press(crate::Message::MirrorTopToggled(!state.mirror_top)),
     ]
     .spacing(12);
 
