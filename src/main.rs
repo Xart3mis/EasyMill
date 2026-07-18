@@ -1017,8 +1017,12 @@ fn subscription(state: &AppState) -> Subscription<Message> {
         Subscription::none()
     };
 
+    // Note: FileDropped events require X11; on Wayland use WINIT_UNIX_BACKEND=x11.
+    // We accept events regardless of status because drop events are always Ignored.
     let dnd_sub = event::listen_with(
-        |event: iced::event::Event, _status: iced::event::Status, _window: iced::window::Id| {
+        |event: iced::event::Event, status: iced::event::Status, _window: iced::window::Id| {
+            // Accept regardless of status — drop events are always Ignored
+            let _ = status;
             if let iced::event::Event::Window(iced::window::Event::FileDropped(path)) = event {
                 Some(Message::FileDropped(path))
             } else {

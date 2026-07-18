@@ -34,7 +34,7 @@ pub fn drop_zone<'a>(on_press: crate::Message) -> Element<'a, crate::Message> {
                     .font(palette::MONO)
                     .size(13)
                     .color(palette::text_secondary()),
-                text(".GTL  .GBL  .GKO  .DRL  .TXT  …")
+                text(".GTL  .GBL  .GKO  .DRL  .TXT  … (click on Wayland)")
                     .font(palette::MONO)
                     .size(11)
                     .color(palette::text_muted()),
