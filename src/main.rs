@@ -699,29 +699,19 @@ fn theme(_state: &AppState) -> Theme {
 }
 
 fn view(state: &AppState) -> Element<'_, Message> {
-    use ui::{header, tab_bar, source_panel, config_panel, pipeline_panel, status_line};
+    use ui::{sidebar, step_canvas};
 
-    let content: Element<'_, Message> = match state.active_tab {
-        Tab::Source => scrollable(source_panel(state)).height(Length::Fill).into(),
-        Tab::Settings => scrollable(config_panel(state)).height(Length::Fill).into(),
-        Tab::Pipeline => pipeline_panel(state),
-    };
-
-    let shell = column![
-        header(),
-        tab_bar(state.active_tab),
-        content,
-        status_line(state),
+    let layout = iced::widget::row![
+        sidebar(state),
+        scrollable(step_canvas(state))
+            .height(Length::Fill)
+            .width(Length::Fill),
     ]
-    .spacing(16)
-    .height(Length::Fill)
-    .max_width(960);
+    .height(Length::Fill);
 
-    container(shell)
+    container(layout)
         .width(Length::Fill)
         .height(Length::Fill)
-        .center_x(Length::Fill)
-        .padding([24, 32])
         .style(ui::styles::app_style())
         .into()
 }
