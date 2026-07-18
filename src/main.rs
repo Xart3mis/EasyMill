@@ -27,16 +27,27 @@ pub(crate) enum StepState {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GcodeSide {
+    Top,
+    Bottom,
+}
+
 
 pub(crate) struct AppState {
     pub(crate) stackup: Stackup,
     pub(crate) editing_layer: Option<usize>,
-    pub(crate) loaded_png_path: Option<PathBuf>,
+    pub(crate) loaded_top_png_path: Option<PathBuf>,
+    pub(crate) loaded_bottom_png_path: Option<PathBuf>,
     pub(crate) loaded_inputs: Vec<String>,
     pub(crate) gerber_to_png: StepState,
     pub(crate) png_to_gcode: StepState,
     pub(crate) generated_pngs: Option<PngLayerResults>,
-    pub(crate) generated_gcode: Option<String>,
+    pub(crate) generated_top_gcode: Option<GcodeResult>,
+    pub(crate) generated_bottom_gcode: Option<GcodeResult>,
+    pub(crate) active_gcode_side: GcodeSide,
+    pub(crate) gcode_side_indicator: String,
+    pub(crate) mirror_bottom: bool,
     pub(crate) gerber_to_png_progress: f32,
     pub(crate) png_to_gcode_progress: f32,
     pub(crate) status: String,
@@ -65,12 +76,17 @@ impl Default for AppState {
         Self {
             stackup: Stackup::new(),
             editing_layer: None,
-            loaded_png_path: None,
+            loaded_top_png_path: None,
+            loaded_bottom_png_path: None,
             loaded_inputs: Vec::new(),
             gerber_to_png: StepState::default(),
             png_to_gcode: StepState::default(),
             generated_pngs: None,
-            generated_gcode: None,
+            generated_top_gcode: None,
+            generated_bottom_gcode: None,
+            active_gcode_side: GcodeSide::Top,
+            gcode_side_indicator: "Top".to_owned(),
+            mirror_bottom: true,
             gerber_to_png_progress: 0.0,
             png_to_gcode_progress: 0.0,
             status: String::new(),
@@ -110,26 +126,24 @@ impl AppState {
         settings.tool_diameter_mm = self.tool_diameter_mm_input.parse::<f32>().unwrap_or(0.4);
         settings.offset_number = self.offset_number_input.parse::<u32>().unwrap_or(4);
         settings.offset_stepover = self.offset_stepover_input.parse::<f32>().unwrap_or(0.5);
+        settings.mirror_bottom = self.mirror_bottom;
         settings
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
-    SelectCopperFiles,
-    SelectOutlineFiles,
-    SelectDrillFiles,
-    CopperFilesPicked(Option<Vec<PathBuf>>),
-    OutlineFilesPicked(Option<Vec<PathBuf>>),
-    DrillFilesPicked(Option<Vec<PathBuf>>),
     SelectGerberFiles,
     GerberFilesPicked(Option<Vec<PathBuf>>),
     OverrideLayer { index: usize, category: LayerCategory, side: Side },
     LoadPng,
-    LoadPngPicked(Option<PathBuf>),
+    LoadTopPngPicked(Option<PathBuf>),
+    LoadBottomPng,
+    LoadBottomPngPicked(Option<PathBuf>),
     ConvertToPng,
     ConvertToPngFinished(Result<PngLayerResults, String>),
     SaveCopperPng,
+    SaveCopperBottomPng,
     SaveDrillPng,
     SaveOutlinePng,
     SaveAllPngs,
@@ -137,8 +151,12 @@ pub(crate) enum Message {
     SavePngPathPicked((Option<PathBuf>, PathBuf)),
     GenerateGcode,
     GenerateGcodeFinished(Result<GcodeResult, String>),
+    GenerateBothGcode,
+    GenerateBothGcodeFinished(Result<(GcodeResult, GcodeResult), String>),
     SaveGcode,
     GcodeSavePathPicked(Option<PathBuf>),
+    SwitchGcodeSide(GcodeSide),
+    MirrorBottomToggled(bool),
     PollProgress,
     Reset,
     DpiChanged(String),
@@ -174,106 +192,61 @@ fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
     match message {
-        Message::SelectCopperFiles => {
-            return Task::perform(
-                async {
-                    rfd::FileDialog::new()
-                        .set_title("Select Gerber / Drill files (Copper)")
-                        .pick_files()
-                },
-                Message::CopperFilesPicked,
-            );
-        }
-        Message::SelectOutlineFiles => {
-            return Task::perform(
-                async {
-                    rfd::FileDialog::new()
-                        .set_title("Select Gerber / Drill files (Outline)")
-                        .pick_files()
-                },
-                Message::OutlineFilesPicked,
-            );
-        }
-        Message::SelectDrillFiles => {
-            return Task::perform(
-                async {
-                    rfd::FileDialog::new()
-                        .set_title("Select Gerber / Drill files (Drill)")
-                        .pick_files()
-                },
-                Message::DrillFilesPicked,
-            );
-        }
-        Message::CopperFilesPicked(files) => {
-            if let Some(files) = files {
-                let count = files.len();
-                state.stackup.layers.retain(|l| l.effective_category() != LayerCategory::Copper);
-                for path in files {
-                    state.stackup.layers.push(LayerFile::new(path, LayerCategory::Copper, Side::Top));
-                }
-                state.loaded_inputs = derive_loaded_inputs(state);
-                state.gerber_to_png = StepState::Ready;
-                state.status = format!("Copper layers loaded ({count} files).");
-                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
-                state.gcode_stale = state.png_to_gcode == StepState::Complete;
-            }
-        }
-        Message::OutlineFilesPicked(files) => {
-            if let Some(files) = files {
-                let count = files.len();
-                state.stackup.layers.retain(|l| l.effective_category() != LayerCategory::Outline);
-                for path in files {
-                    state.stackup.layers.push(LayerFile::new(path, LayerCategory::Outline, Side::All));
-                }
-                state.loaded_inputs = derive_loaded_inputs(state);
-                state.gerber_to_png = StepState::Ready;
-                state.status = format!("Outline loaded ({count} files).");
-                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
-                state.gcode_stale = state.png_to_gcode == StepState::Complete;
-            }
-        }
-        Message::DrillFilesPicked(files) => {
-            if let Some(files) = files {
-                let count = files.len();
-                state.stackup.layers.retain(|l| l.effective_category() != LayerCategory::Drill);
-                for path in files {
-                    state.stackup.layers.push(LayerFile::new(path, LayerCategory::Drill, Side::All));
-                }
-                state.loaded_inputs = derive_loaded_inputs(state);
-                state.gerber_to_png = StepState::Ready;
-                state.status = format!("Drills loaded ({count} files).");
-                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
-                state.gcode_stale = state.png_to_gcode == StepState::Complete;
-            }
-        }
         Message::LoadPng => {
             return Task::perform(
                 async {
                     rfd::FileDialog::new()
                         .add_filter("PNG image", &["png"])
-                        .set_title("Load existing rendered PNG")
+                        .set_title("Load top traces PNG")
                         .pick_file()
                 },
-                Message::LoadPngPicked,
+                Message::LoadTopPngPicked,
             );
         }
-        Message::LoadPngPicked(file) => {
+        Message::LoadTopPngPicked(file) => {
             if let Some(path) = file {
-                state.loaded_png_path = Some(path.clone());
+                state.loaded_top_png_path = Some(path.clone());
                 state.generated_pngs = None;
                 state.gerber_to_png = StepState::Idle;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.png_to_gcode = StepState::Ready;
-                state.status = "PNG loaded. Ready to generate G-code.".into();
+                state.status = "Top PNG loaded. Ready to generate G-code.".into();
+            }
+        }
+        Message::LoadBottomPng => {
+            return Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter("PNG image", &["png"])
+                        .set_title("Load bottom traces PNG")
+                        .pick_file()
+                },
+                Message::LoadBottomPngPicked,
+            );
+        }
+        Message::LoadBottomPngPicked(file) => {
+            if let Some(path) = file {
+                state.loaded_bottom_png_path = Some(path.clone());
+                state.generated_pngs = None;
+                state.gerber_to_png = StepState::Idle;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.png_to_gcode = StepState::Ready;
+                state.status = "Bottom PNG loaded. Ready to generate G-code.".into();
             }
         }
         Message::ConvertToPng => {
-            let (copper, outline, drill) = state.stackup.milling_paths();
+            let (copper_top, copper_bottom, outline, drill) = state.stackup.milling_paths();
 
-            if copper.is_empty() && outline.is_empty() && drill.is_empty() {
+            if copper_top.is_empty() && copper_bottom.is_empty() && outline.is_empty() && drill.is_empty() {
                 warn!("convert to png requested with no inputs loaded");
                 state.status = "Load Gerber files before converting.".to_owned();
                 return Task::none();
+            }
+
+            for layer in &state.stackup.layers {
+                if layer.effective_category() == LayerCategory::Copper && layer.effective_side() == Side::All {
+                    warn!("Layer {} has Side::All — treating as top for copper", layer.filename());
+                }
             }
 
             let settings = state.get_settings();
@@ -294,8 +267,11 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return Task::perform(
                 async move {
                     spawn_blocking(move || {
-                        gerber_inputs_to_png(&copper, &outline, &drill, &output_dir, &output_stem, settings, on_progress)
-                            .map_err(|e| e.to_string())
+                        gerber_inputs_to_png(
+                            &copper_top, &copper_bottom, &outline, &drill,
+                            &output_dir, &output_stem, settings, on_progress,
+                        )
+                        .map_err(|e| e.to_string())
                     })
                     .await
                     .unwrap_or_else(|join_err| {
@@ -313,23 +289,25 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.gerber_to_png_progress = 1.0;
                 state.png_progress.store(1000, Ordering::Relaxed);
                 state.png_to_gcode = StepState::Ready;
-                state.loaded_png_path = Some(layers.copper.path.clone());
+                state.loaded_top_png_path = Some(layers.copper_top.path.clone());
+                state.loaded_bottom_png_path = Some(layers.copper_bottom.path.clone());
                 state.status = format!(
-                    "Rendered 3 PNGs ({}x{}). Copper: {} dark px. Ready for G-code.",
-                    layers.copper.width,
-                    layers.copper.height,
-                    layers.copper.dark_pixels,
+                    "Rendered 4 PNGs ({}x{}). Top: {} dark px, Bottom: {} dark px. Ready for G-code.",
+                    layers.copper_top.width,
+                    layers.copper_top.height,
+                    layers.copper_top.dark_pixels,
+                    layers.copper_bottom.dark_pixels,
                 );
             }
             Err(err) => {
                 state.gerber_to_png = StepState::Ready;
                 state.status = format!("Rendering failed: {err}");
-                error!("gerber to 3-png conversion failed: {err}");
+                error!("gerber to 4-png conversion failed: {err}");
             }
         },
         Message::SaveCopperPng => {
             let src = match &state.generated_pngs {
-                Some(p) => p.copper.path.clone(),
+                Some(p) => p.copper_top.path.clone(),
                 None => {
                     state.status = "Run the conversion before saving PNGs.".to_owned();
                     return Task::none();
@@ -339,8 +317,28 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 async move {
                     let dest = rfd::FileDialog::new()
                         .add_filter("PNG", &["png"])
-                        .set_file_name("traces.png")
-                        .set_title("Save copper traces PNG")
+                        .set_file_name("traces_top.png")
+                        .set_title("Save top traces PNG")
+                        .save_file();
+                    (dest, src)
+                },
+                Message::SavePngPathPicked,
+            );
+        }
+        Message::SaveCopperBottomPng => {
+            let src = match &state.generated_pngs {
+                Some(p) => p.copper_bottom.path.clone(),
+                None => {
+                    state.status = "Run the conversion before saving PNGs.".to_owned();
+                    return Task::none();
+                }
+            };
+            return Task::perform(
+                async move {
+                    let dest = rfd::FileDialog::new()
+                        .add_filter("PNG", &["png"])
+                        .set_file_name("traces_bot.png")
+                        .set_title("Save bottom traces PNG")
                         .save_file();
                     (dest, src)
                 },
@@ -398,7 +396,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return Task::perform(
                 async move {
                     let dir = rfd::FileDialog::new()
-                        .set_title("Select directory to save all 3 PNGs")
+                        .set_title("Select directory to save all 4 PNGs")
                         .pick_folder();
                     (dir, pngs)
                 },
@@ -408,7 +406,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::SaveAllPngsFinished((dir_opt, pngs)) => {
             if let Some(dir) = dir_opt {
                 for (result, name) in [
-                    (&pngs.copper, "traces.png"),
+                    (&pngs.copper_top, "traces_top.png"),
+                    (&pngs.copper_bottom, "traces_bot.png"),
                     (&pngs.drills, "drills.png"),
                     (&pngs.outline, "outline.png"),
                 ] {
@@ -417,7 +416,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                         error!("failed to save {name}: {err}");
                     }
                 }
-                state.status = format!("Saved 3 PNGs to {}.", dir.display());
+                state.status = format!("Saved 4 PNGs to {}.", dir.display());
             }
         }
         Message::SavePngPathPicked((dest, src)) => {
@@ -437,11 +436,19 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             }
         }
         Message::GenerateGcode => {
-            let png_path = match &state.loaded_png_path {
+            let png_path = match state.active_gcode_side {
+                GcodeSide::Top => &state.loaded_top_png_path,
+                GcodeSide::Bottom => &state.loaded_bottom_png_path,
+            };
+            let png_path = match png_path {
                 Some(p) => p.to_string_lossy().into_owned(),
                 None => {
-                    warn!("generate gcode requested with no png loaded");
-                    state.status = "Generate a PNG or load one first.".to_owned();
+                    let side_label = match state.active_gcode_side {
+                        GcodeSide::Top => "top",
+                        GcodeSide::Bottom => "bottom",
+                    };
+                    warn!("generate gcode requested with no {side_label} png loaded");
+                    state.status = format!("Generate a {side_label} PNG or load one first.");
                     return Task::none();
                 }
             };
@@ -474,28 +481,38 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::GenerateGcodeFinished(result) => match result {
             Ok(gcode_result) => {
-                state.generated_gcode = Some(gcode_result.gcode);
+                let time_secs = gcode_result.estimated_time_secs;
+                let cut_dist = gcode_result.cut_distance_mm;
+                let width = gcode_result.width_mm;
+                let height = gcode_result.height_mm;
+                let path_count = gcode_result.paths.len();
+
+                match state.active_gcode_side {
+                    GcodeSide::Top => state.generated_top_gcode = Some(gcode_result),
+                    GcodeSide::Bottom => state.generated_bottom_gcode = Some(gcode_result),
+                }
+
                 state.png_to_gcode = StepState::Complete;
                 state.gcode_stale = false;
                 state.png_to_gcode_progress = 1.0;
                 state.gcode_progress.store(1000, Ordering::Relaxed);
 
-                let time_secs = gcode_result.estimated_time_secs;
                 let hours = (time_secs / 3600.0) as u32;
                 let mins = ((time_secs % 3600.0) / 60.0) as u32;
                 let secs = (time_secs % 60.0) as u32;
                 state.estimated_time = format!("{hours:02}:{mins:02}:{secs:02}");
-                state.cut_distance =
-                    format!("{:.1} mm", gcode_result.cut_distance_mm);
-                state.board_dimensions = format!(
-                    "{:.1} x {:.1} mm",
-                    gcode_result.width_mm, gcode_result.height_mm
-                );
+                state.cut_distance = format!("{:.1} mm", cut_dist);
+                state.board_dimensions = format!("{:.1} x {:.1} mm", width, height);
+
+                let side_label = match state.active_gcode_side {
+                    GcodeSide::Top => "top",
+                    GcodeSide::Bottom => "bottom",
+                };
 
                 state.status = format!(
-                    "Generated G-code: {} paths, {:.1}m cut, est. {:02}:{:02}:{:02}.",
-                    gcode_result.paths.len(),
-                    gcode_result.cut_distance_mm / 1000.0,
+                    "Generated {side_label} G-code: {} paths, {:.1}m cut, est. {:02}:{:02}:{:02}.",
+                    path_count,
+                    cut_dist / 1000.0,
                     hours,
                     mins,
                     secs,
@@ -507,19 +524,104 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 error!("png to gcode conversion failed: {err}");
             }
         },
+        Message::GenerateBothGcode => {
+            let top_path = match &state.loaded_top_png_path {
+                Some(p) => p.clone(),
+                None => {
+                    state.status = "Generate a top PNG first.".to_owned();
+                    return Task::none();
+                }
+            };
+            let bottom_path = match &state.loaded_bottom_png_path {
+                Some(p) => p.clone(),
+                None => {
+                    state.status = "Generate a bottom PNG first.".to_owned();
+                    return Task::none();
+                }
+            };
+
+            let settings = state.get_settings();
+
+            state.png_to_gcode = StepState::Running;
+            state.status = "Generating G-code for both sides...".to_owned();
+
+            let gcode_progress = state.gcode_progress.clone();
+            gcode_progress.store(0, Ordering::Relaxed);
+
+            let on_progress: Option<easymill::conversion::ProgressFn> = Some(Box::new(move |p: f32| {
+                gcode_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
+            }));
+
+            return Task::perform(
+                async move {
+                    spawn_blocking(move || {
+                        let top_result = png_to_gcode(&top_path, settings.clone(), on_progress)
+                            .map_err(|e| e.to_string())?;
+                        let bottom_result = png_to_gcode(&bottom_path, settings, None)
+                            .map_err(|e| e.to_string())?;
+                        Ok((top_result, bottom_result))
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| {
+                        Err(format!("Blocking task failed: {join_err}"))
+                    })
+                },
+                |result| match result {
+                    Ok((top, bottom)) => Message::GenerateBothGcodeFinished(Ok((top, bottom))),
+                    Err(e) => Message::GenerateBothGcodeFinished(Err(e)),
+                },
+            );
+        }
+        Message::GenerateBothGcodeFinished(result) => match result {
+            Ok((top_result, bottom_result)) => {
+                state.generated_top_gcode = Some(top_result);
+                state.generated_bottom_gcode = Some(bottom_result);
+                state.png_to_gcode = StepState::Complete;
+                state.gcode_stale = false;
+                state.png_to_gcode_progress = 1.0;
+                state.gcode_progress.store(1000, Ordering::Relaxed);
+
+                let gcode_result = match state.active_gcode_side {
+                    GcodeSide::Top => state.generated_top_gcode.as_ref().unwrap(),
+                    GcodeSide::Bottom => state.generated_bottom_gcode.as_ref().unwrap(),
+                };
+                let time_secs = gcode_result.estimated_time_secs;
+                let hours = (time_secs / 3600.0) as u32;
+                let mins = ((time_secs % 3600.0) / 60.0) as u32;
+                let secs = (time_secs % 60.0) as u32;
+                state.estimated_time = format!("{hours:02}:{mins:02}:{secs:02}");
+                state.cut_distance = format!("{:.1} mm", gcode_result.cut_distance_mm);
+                state.board_dimensions = format!("{:.1} x {:.1} mm", gcode_result.width_mm, gcode_result.height_mm);
+
+                state.status = "Generated G-code for both sides.".to_owned();
+            }
+            Err(err) => {
+                state.png_to_gcode = StepState::Ready;
+                state.status = format!("G-code generation failed: {err}");
+                error!("png to gcode conversion failed: {err}");
+            }
+        },
         Message::SaveGcode => {
-            if state.generated_gcode.is_none() {
+            let has_gcode = match state.active_gcode_side {
+                GcodeSide::Top => state.generated_top_gcode.is_some(),
+                GcodeSide::Bottom => state.generated_bottom_gcode.is_some(),
+            };
+            if !has_gcode {
                 warn!("save requested before gcode was generated");
                 state.status = "Run the pipeline before saving G-code.".to_owned();
                 return Task::none();
             }
 
             info!("opening gcode save dialog");
+            let filename = match state.active_gcode_side {
+                GcodeSide::Top => "output_top.gcode",
+                GcodeSide::Bottom => "output_bot.gcode",
+            };
             return Task::perform(
-                async {
+                async move {
                     rfd::FileDialog::new()
                         .add_filter("G-code", &["gcode", "nc", "tap"])
-                        .set_file_name("output.gcode")
+                        .set_file_name(filename)
                         .set_title("Save generated G-code")
                         .save_file()
                 },
@@ -528,8 +630,12 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::GcodeSavePathPicked(path) => {
             if let Some(path) = path {
-                if let Some(gcode) = &state.generated_gcode {
-                    match fs::write(&path, gcode) {
+                let gcode = match state.active_gcode_side {
+                    GcodeSide::Top => state.generated_top_gcode.as_ref().map(|r| r.gcode.clone()),
+                    GcodeSide::Bottom => state.generated_bottom_gcode.as_ref().map(|r| r.gcode.clone()),
+                };
+                if let Some(gcode) = gcode {
+                    match fs::write(&path, &gcode) {
                         Ok(()) => {
                             info!(
                                 path = %path.display(),
@@ -556,6 +662,30 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 info!("gcode save canceled");
                 state.status = "Save canceled.".to_owned();
             }
+        }
+        Message::SwitchGcodeSide(side) => {
+            state.active_gcode_side = side;
+            state.gcode_side_indicator = match side {
+                GcodeSide::Top => "Top",
+                GcodeSide::Bottom => "Bottom",
+            }.to_owned();
+            if let Some(gcode_result) = match side {
+                GcodeSide::Top => state.generated_top_gcode.as_ref(),
+                GcodeSide::Bottom => state.generated_bottom_gcode.as_ref(),
+            } {
+                let time_secs = gcode_result.estimated_time_secs;
+                let hours = (time_secs / 3600.0) as u32;
+                let mins = ((time_secs % 3600.0) / 60.0) as u32;
+                let secs = (time_secs % 60.0) as u32;
+                state.estimated_time = format!("{hours:02}:{mins:02}:{secs:02}");
+                state.cut_distance = format!("{:.1} mm", gcode_result.cut_distance_mm);
+                state.board_dimensions = format!("{:.1} x {:.1} mm", gcode_result.width_mm, gcode_result.height_mm);
+            }
+        }
+        Message::MirrorBottomToggled(val) => {
+            state.mirror_bottom = val;
+            state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::PollProgress => {
             if state.gerber_to_png == StepState::Running {
@@ -609,7 +739,11 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::ClearPng => {
-            state.loaded_png_path = None;
+            state.loaded_top_png_path = None;
+            state.loaded_bottom_png_path = None;
+            state.generated_pngs = None;
+            state.generated_top_gcode = None;
+            state.generated_bottom_gcode = None;
             state.gerber_to_png = StepState::Idle;
             state.png_to_gcode = StepState::Ready;
             state.gcode_stale = state.png_to_gcode == StepState::Complete;
@@ -723,15 +857,20 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             return update(state, Message::GenerateGcode);
         }
         Message::RunAll => {
-            let (copper, outline, drill) = state.stackup.milling_paths();
-            let has_gerbers = !copper.is_empty() || !outline.is_empty() || !drill.is_empty();
+            let (copper_top, copper_bottom, outline, drill) = state.stackup.milling_paths();
+            let has_gerbers = !copper_top.is_empty() || !copper_bottom.is_empty() || !outline.is_empty() || !drill.is_empty();
             let rasterize_needed = has_gerbers
                 && (state.gerber_to_png != StepState::Complete || state.rasterize_stale);
-            let gcode_needed = state.loaded_png_path.is_some()
+            let has_both_pngs = state.loaded_top_png_path.is_some() && state.loaded_bottom_png_path.is_some();
+            let has_any_png = state.loaded_top_png_path.is_some() || state.loaded_bottom_png_path.is_some();
+            let gcode_needed = has_any_png
                 && (state.png_to_gcode != StepState::Complete || state.gcode_stale);
             if rasterize_needed {
                 state.rasterize_stale = false;
                 return update(state, Message::ConvertToPng);
+            } else if gcode_needed && has_both_pngs {
+                state.gcode_stale = false;
+                return update(state, Message::GenerateBothGcode);
             } else if gcode_needed {
                 state.gcode_stale = false;
                 return update(state, Message::GenerateGcode);
@@ -801,5 +940,3 @@ pub fn main() -> iced::Result {
 fn path_to_label(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
-
-

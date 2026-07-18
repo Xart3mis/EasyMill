@@ -147,24 +147,24 @@ pub fn step_canvas<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message
 // --- Step card stubs (filled in Tasks 7–10) ---
 
 pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let (copper, outline, drill) = state.stackup.milling_paths();
-    let has_gerbers = !copper.is_empty() || !outline.is_empty() || !drill.is_empty();
-    let is_skipped = state.loaded_png_path.is_some() && state.stackup.layers.is_empty();
-    let has_input = has_gerbers || state.loaded_png_path.is_some();
+    let (copper_top, copper_bottom, outline, drill) = state.stackup.milling_paths();
+    let has_gerbers = !copper_top.is_empty() || !copper_bottom.is_empty() || !outline.is_empty() || !drill.is_empty();
+    let has_loaded_png = state.loaded_top_png_path.is_some() || state.loaded_bottom_png_path.is_some();
+    let is_skipped = has_loaded_png && state.stackup.layers.is_empty();
+    let has_input = has_gerbers || has_loaded_png;
 
     let vs = if has_input { CardVisualState::Complete } else { CardVisualState::Active };
     let is_expanded = state.expanded_step == Some(1);
 
     let n_files = state.stackup.layers.len();
     let summary_str: String = if is_skipped {
-        let name = state.loaded_png_path.as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
-        format!("PNG: {name}")
+        let mut parts = Vec::new();
+        if state.loaded_top_png_path.is_some() { parts.push("Top"); }
+        if state.loaded_bottom_png_path.is_some() { parts.push("Bot"); }
+        format!("PNG loaded: {}", parts.join(", "))
     } else if has_gerbers {
         let mut parts = Vec::new();
-        if !copper.is_empty() { parts.push("Cu"); }
+        if !copper_top.is_empty() || !copper_bottom.is_empty() { parts.push("Cu"); }
         if !outline.is_empty() { parts.push("Out"); }
         if !drill.is_empty() { parts.push("Drl"); }
         format!("{n_files} file(s) · {}", parts.join(", "))
@@ -182,28 +182,34 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
         file_rows.push(layer_row(i, cat, side, is_overridden, name, is_editing));
     }
     if is_skipped {
-        let name = state.loaded_png_path.as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_string();
-        file_rows.push(
-            row![
-                text("PNG").font(palette::MONO).size(11).color(palette::signal_green()),
-                text(name)
-                    .font(palette::MONO)
-                    .size(13)
-                    .color(palette::text_secondary())
-                    .width(Length::Fill),
-                button(text("✕").font(palette::MONO).size(11).color(palette::text_muted()))
-                    .style(styles::transparent_button_style)
-                    .padding([2, 6])
-                    .on_press(crate::Message::ClearPng),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .into(),
-        );
+        let png_rows: Vec<Element<'_, crate::Message>> = [
+            (state.loaded_top_png_path.as_ref(), "Top"),
+            (state.loaded_bottom_png_path.as_ref(), "Bot"),
+        ].iter().filter_map(|(path_opt, side_label)| {
+            let path = (*path_opt)?;
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            Some(
+                row![
+                    text(*side_label).font(palette::MONO).size(11).color(palette::signal_green()),
+                    text(name)
+                        .font(palette::MONO)
+                        .size(13)
+                        .color(palette::text_secondary())
+                        .width(Length::Fill),
+                    button(text("✕").font(palette::MONO).size(11).color(palette::text_muted()))
+                        .style(styles::transparent_button_style)
+                        .padding([2, 6])
+                        .on_press(crate::Message::ClearPng),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .into(),
+            )
+        }).collect();
+        file_rows.extend(png_rows);
     }
 
     let files_col = iced::widget::Column::with_children(file_rows).spacing(6);
@@ -220,8 +226,8 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let load_png_btn = button(
-        text("↑  Load existing PNG instead")
+    let load_top_btn = button(
+        text("↑  Load Top PNG instead")
             .font(palette::MONO)
             .size(13)
             .color(palette::text_secondary()),
@@ -231,11 +237,23 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
     .padding([8, 12])
     .on_press(crate::Message::LoadPng);
 
+    let load_bot_btn = button(
+        text("↑  Load Bottom PNG instead")
+            .font(palette::MONO)
+            .size(13)
+            .color(palette::text_secondary()),
+    )
+    .style(styles::ghost_action_style)
+    .width(Length::Fill)
+    .padding([8, 12])
+    .on_press(crate::Message::LoadBottomPng);
+
     let content = column![
         drop_zone(crate::Message::SelectGerberFiles),
         files_col,
         or_row,
-        load_png_btn,
+        load_top_btn,
+        load_bot_btn,
     ]
     .spacing(12);
 
@@ -251,6 +269,14 @@ pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messa
 
     let geometry_content = column![
         setting_field("Resolution (DPI)", &state.dpi_input, crate::Message::DpiChanged),
+        button(
+            text(if state.mirror_bottom { "☑ Mirror bottom traces" } else { "☐ Mirror bottom traces" })
+                .font(palette::MONO).size(12).color(palette::text_secondary()),
+        )
+        .style(styles::ghost_action_style)
+        .padding([7, 12])
+        .width(Length::Fill)
+        .on_press(crate::Message::MirrorBottomToggled(!state.mirror_bottom)),
     ]
     .spacing(12);
 
@@ -306,12 +332,13 @@ pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messa
 }
 
 pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let (has_copper, has_outline, has_drill) = {
-        let (c, o, d) = state.stackup.milling_paths();
-        (!c.is_empty(), !o.is_empty(), !d.is_empty())
+    let (has_copper_top, has_copper_bottom, has_outline, has_drill) = {
+        let (ct, cb, o, d) = state.stackup.milling_paths();
+        (!ct.is_empty(), !cb.is_empty(), !o.is_empty(), !d.is_empty())
     };
-    let has_gerbers = has_copper || has_outline || has_drill;
-    let is_skipped = state.loaded_png_path.is_some() && !has_gerbers;
+    let has_gerbers = has_copper_top || has_copper_bottom || has_outline || has_drill;
+    let has_loaded_png = state.loaded_top_png_path.is_some() || state.loaded_bottom_png_path.is_some();
+    let is_skipped = has_loaded_png && !has_gerbers;
 
     let vs = if is_skipped {
         CardVisualState::Complete
@@ -329,7 +356,7 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
         "Skipped — PNG loaded directly".to_owned()
     } else {
         match state.gerber_to_png {
-            StepState::Complete => "3 layers rendered".to_owned(),
+            StepState::Complete => "4 layers rendered".to_owned(),
             _ => "Not yet run".to_owned(),
         }
     };
@@ -389,9 +416,10 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
 
     let p = state.gerber_to_png_progress;
     let progress_rows = column![
-        layer_progress("Cu", if state.gerber_to_png == StepState::Complete { 1.0 } else { p }),
-        layer_progress("Out", if state.gerber_to_png == StepState::Complete { 1.0 } else { (p - 0.33).max(0.0) }),
-        layer_progress("Drl", if state.gerber_to_png == StepState::Complete { 1.0 } else { (p - 0.66).max(0.0) }),
+        layer_progress("Top", if state.gerber_to_png == StepState::Complete { 1.0 } else { p.min(0.25) / 0.25 }),
+        layer_progress("Bot", if state.gerber_to_png == StepState::Complete { 1.0 } else { ((p - 0.25).max(0.0) / 0.25).min(1.0) }),
+        layer_progress("Out", if state.gerber_to_png == StepState::Complete { 1.0 } else { ((p - 0.50).max(0.0) / 0.25).min(1.0) }),
+        layer_progress("Drl", if state.gerber_to_png == StepState::Complete { 1.0 } else { ((p - 0.75).max(0.0) / 0.25).min(1.0) }),
     ]
     .spacing(8);
 
@@ -415,7 +443,8 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
             .into()
         };
         row![
-            thumb(&pngs.copper, "Traces"),
+            thumb(&pngs.copper_top, "Top"),
+            thumb(&pngs.copper_bottom, "Bot"),
             thumb(&pngs.drills, "Drills"),
             thumb(&pngs.outline, "Outline"),
         ]
@@ -428,11 +457,16 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
     // --- Save buttons (shown only when PNGs exist) ---
     let save_btns: Element<'_, crate::Message> = if state.generated_pngs.is_some() {
         row![
-            button(text("↓ Traces").font(palette::MONO).size(12))
+            button(text("↓ Top").font(palette::MONO).size(12))
                 .style(styles::secondary_action_style)
                 .width(Length::FillPortion(1))
                 .padding([7, 10])
                 .on_press(crate::Message::SaveCopperPng),
+            button(text("↓ Bot").font(palette::MONO).size(12))
+                .style(styles::secondary_action_style)
+                .width(Length::FillPortion(1))
+                .padding([7, 10])
+                .on_press(crate::Message::SaveCopperBottomPng),
             button(text("↓ Drills").font(palette::MONO).size(12))
                 .style(styles::secondary_action_style)
                 .width(Length::FillPortion(1))
@@ -495,7 +529,14 @@ pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Mess
 }
 
 pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let has_png = state.generated_pngs.is_some() || state.loaded_png_path.is_some();
+    let has_png = state.generated_pngs.is_some()
+        || state.loaded_top_png_path.is_some()
+        || state.loaded_bottom_png_path.is_some();
+
+    let active_gcode_exists = match state.active_gcode_side {
+        crate::GcodeSide::Top => state.generated_top_gcode.is_some(),
+        crate::GcodeSide::Bottom => state.generated_bottom_gcode.is_some(),
+    };
 
     let vs = if state.gcode_stale {
         CardVisualState::Stale
@@ -509,7 +550,7 @@ pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
 
     let summary = match state.png_to_gcode {
         StepState::Complete => {
-            format!("board.nc · est. {}", state.estimated_time)
+            format!("{} · est. {}", state.gcode_side_indicator, state.estimated_time)
         }
         _ => "Not yet run".to_owned(),
     };
@@ -536,6 +577,42 @@ pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
             .into()
     };
 
+    // Side toggle buttons
+    let side_tabs: Element<'_, crate::Message> = {
+        let top_active = state.active_gcode_side == crate::GcodeSide::Top;
+        let bot_active = state.active_gcode_side == crate::GcodeSide::Bottom;
+        let has_top = state.generated_top_gcode.is_some();
+        let has_bot = state.generated_bottom_gcode.is_some();
+        row![
+            button(text(format!("▴ Top{}", if has_top { " ✓" } else { "" })).font(palette::MONO).size(12))
+                .style(move |theme: &Theme, status: button::Status| {
+                    let mut s = styles::secondary_action_style(theme, status);
+                    if top_active {
+                        s.border = iced::border::rounded(8.0).color(palette::accent()).width(1.5);
+                        s.text_color = palette::accent();
+                    }
+                    s
+                })
+                .width(Length::FillPortion(1))
+                .padding([6, 10])
+                .on_press(crate::Message::SwitchGcodeSide(crate::GcodeSide::Top)),
+            button(text(format!("▾ Bot{}", if has_bot { " ✓" } else { "" })).font(palette::MONO).size(12))
+                .style(move |theme: &Theme, status: button::Status| {
+                    let mut s = styles::secondary_action_style(theme, status);
+                    if bot_active {
+                        s.border = iced::border::rounded(8.0).color(palette::accent()).width(1.5);
+                        s.text_color = palette::accent();
+                    }
+                    s
+                })
+                .width(Length::FillPortion(1))
+                .padding([6, 10])
+                .on_press(crate::Message::SwitchGcodeSide(crate::GcodeSide::Bottom)),
+        ]
+        .spacing(6)
+        .into()
+    };
+
     // Progress bar
     let bar_color = if state.png_to_gcode == StepState::Complete { palette::signal_green() } else { palette::accent() };
     let progress = progress_bar(0.0..=1.0, state.png_to_gcode_progress)
@@ -551,7 +628,7 @@ pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
         .height(Length::Fixed(6.0));
 
     // Stats card
-    let stats: Element<'_, crate::Message> = if state.png_to_gcode == StepState::Complete {
+    let stats: Element<'_, crate::Message> = if state.png_to_gcode == StepState::Complete && active_gcode_exists {
         container(
             column![
                 row![
@@ -581,8 +658,8 @@ pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
     };
 
     // Save button
-    let save_btn: Element<'_, crate::Message> = if state.generated_gcode.is_some() {
-        button(text("↓  Save G-code").font(palette::mono_bold()).size(13))
+    let save_btn: Element<'_, crate::Message> = if active_gcode_exists {
+        button(text(format!("↓  Save G-code ({})", state.gcode_side_indicator)).font(palette::mono_bold()).size(13))
             .style(styles::primary_action_style)
             .width(Length::Fill)
             .padding([10, 14])
@@ -618,7 +695,7 @@ pub fn gcode_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
         container("").into()
     };
 
-    let content = column![stale_warning, progress, stats, save_btn].spacing(12);
+    let content = column![stale_warning, side_tabs, progress, stats, save_btn].spacing(12);
 
     step_shell(4, "G-CODE", vs, is_expanded, summary, Some(run_btn), content.into())
 }

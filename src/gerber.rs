@@ -31,7 +31,8 @@ pub struct Shape {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LayerType {
-    Copper,
+    CopperTop,
+    CopperBottom,
     Profile,
     Drill,
 }

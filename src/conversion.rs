@@ -30,6 +30,7 @@ pub struct ConversionSettings {
     pub tool_diameter_mm: f32,
     pub offset_number: u32,
     pub offset_stepover: f32,
+    pub mirror_bottom: bool,
 }
 
 impl Default for ConversionSettings {
@@ -46,6 +47,7 @@ impl Default for ConversionSettings {
             tool_diameter_mm: 0.4,
             offset_number: 4,
             offset_stepover: 0.5,
+            mirror_bottom: true,
         }
     }
 }
@@ -60,7 +62,8 @@ pub struct PngRenderResult {
 
 #[derive(Debug, Clone)]
 pub struct PngLayerResults {
-    pub copper: PngRenderResult,
+    pub copper_top: PngRenderResult,
+    pub copper_bottom: PngRenderResult,
     pub drills: PngRenderResult,
     pub outline: PngRenderResult,
 }
@@ -125,7 +128,8 @@ fn gerber_output_stem(paths: &[PathBuf]) -> String {
 }
 
 pub fn gerber_inputs_to_png(
-    copper_inputs: &[PathBuf],
+    copper_top_inputs: &[PathBuf],
+    copper_bottom_inputs: &[PathBuf],
     outline_inputs: &[PathBuf],
     drill_inputs: &[PathBuf],
     output_dir: &Path,
@@ -134,18 +138,22 @@ pub fn gerber_inputs_to_png(
     on_progress: Option<ProgressFn>,
 ) -> Result<PngLayerResults, ConversionError> {
     info!(
-        copper = copper_inputs.len(),
+        copper_top = copper_top_inputs.len(),
+        copper_bottom = copper_bottom_inputs.len(),
         outline = outline_inputs.len(),
         drill = drill_inputs.len(),
-        "starting gerber to 3-png conversion"
+        "starting gerber to 4-png conversion"
     );
 
-    if copper_inputs.is_empty() && outline_inputs.is_empty() && drill_inputs.is_empty() {
+    if copper_top_inputs.is_empty() && copper_bottom_inputs.is_empty()
+        && outline_inputs.is_empty() && drill_inputs.is_empty()
+    {
         return Err(ConversionError::EmptyInput);
     }
 
     let mut all_tagged: Vec<gerber::TaggedTriangle> = Vec::new();
-    let total_files = copper_inputs.len() + outline_inputs.len() + drill_inputs.len();
+    let total_files = copper_top_inputs.len() + copper_bottom_inputs.len()
+        + outline_inputs.len() + drill_inputs.len();
     let mut file_count = 0u32;
 
     let mut parse_and_tag = |paths: &[PathBuf], layer: gerber::LayerType| -> Result<(), ConversionError> {
@@ -167,7 +175,8 @@ pub fn gerber_inputs_to_png(
         Ok(())
     };
 
-    parse_and_tag(copper_inputs, gerber::LayerType::Copper)?;
+    parse_and_tag(copper_top_inputs, gerber::LayerType::CopperTop)?;
+    parse_and_tag(copper_bottom_inputs, gerber::LayerType::CopperBottom)?;
     parse_and_tag(outline_inputs, gerber::LayerType::Profile)?;
     parse_and_tag(drill_inputs, gerber::LayerType::Drill)?;
 
@@ -186,6 +195,7 @@ pub fn gerber_inputs_to_png(
                          suffix: &str,
                          invert: bool,
                          flood_fill: bool,
+                         mirror: bool,
                          progress: f32| -> Result<PngRenderResult, ConversionError>
     {
         let layer_tris: Vec<gerber::Triangle> = tagged.iter()
@@ -197,6 +207,9 @@ pub fn gerber_inputs_to_png(
         let mut image = GrayImage::from_pixel(layout.width, layout.height, Luma([0]));
         gerber::render_triangles_to_image(&mut image, &layer_tris, &layout, 255);
 
+        if mirror {
+            image = image::imageops::flip_horizontal(&image);
+        }
         if invert {
             gerber::invert_image_gray(&mut image);
         }
@@ -217,14 +230,15 @@ pub fn gerber_inputs_to_png(
         })
     };
 
-    let copper = render_layer(&all_tagged, gerber::LayerType::Copper, "_traces.png", false, false, 0.75)?;
-    let drills = render_layer(&all_tagged, gerber::LayerType::Drill, "_drills.png", true, false, 0.85)?;
-    let outline = render_layer(&all_tagged, gerber::LayerType::Profile, "_outline.png", false, true, 0.95)?;
+    let copper_top = render_layer(&all_tagged, gerber::LayerType::CopperTop, "_traces_top.png", false, false, false, 0.60)?;
+    let copper_bottom = render_layer(&all_tagged, gerber::LayerType::CopperBottom, "_traces_bot.png", false, false, settings.mirror_bottom, 0.70)?;
+    let drills = render_layer(&all_tagged, gerber::LayerType::Drill, "_drills.png", true, false, false, 0.85)?;
+    let outline = render_layer(&all_tagged, gerber::LayerType::Profile, "_outline.png", false, true, false, 0.95)?;
 
-    info!("3-png conversion complete: copper={}, drills={}, outline={}",
-        copper.path.display(), drills.path.display(), outline.path.display());
+    info!("4-png conversion complete: copper_top={}, copper_bottom={}, drills={}, outline={}",
+        copper_top.path.display(), copper_bottom.path.display(), drills.path.display(), outline.path.display());
 
-    Ok(PngLayerResults { copper, drills, outline })
+    Ok(PngLayerResults { copper_top, copper_bottom, drills, outline })
 }
 
 #[derive(Debug, Clone)]
@@ -1231,7 +1245,8 @@ mod tests {
         fs::write(&gerber_path, SIMPLE_GERBER).unwrap();
 
         let result = gerber_inputs_to_png(
-            &[gerber_path],
+            &[gerber_path.clone()],
+            &[],
             &[],
             &[],
             &output_dir,
@@ -1244,14 +1259,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.copper.path.exists());
-        assert!(result.copper.width > 0);
-        assert!(result.copper.height > 0);
-        assert!(result.copper.path.to_string_lossy().contains("preview_traces.png"));
+        assert!(result.copper_top.path.exists());
+        assert!(result.copper_top.width > 0);
+        assert!(result.copper_top.height > 0);
+        assert!(result.copper_top.path.to_string_lossy().contains("preview_traces_top.png"));
         assert!(result.drills.path.to_string_lossy().contains("preview_drills.png"));
         assert!(result.outline.path.to_string_lossy().contains("preview_outline.png"));
 
-        let rendered = image::open(&result.copper.path).unwrap().to_luma8();
+        let rendered = image::open(&result.copper_top.path).unwrap().to_luma8();
         let dark_pixels = rendered.pixels().filter(|pixel| pixel[0] < 128).count();
         assert!(dark_pixels > 0);
     }
@@ -1263,12 +1278,12 @@ mod tests {
         fs::write(&gerber_path, SIMPLE_GERBER).unwrap();
 
         let default_result = gerber_inputs_to_png(
-            &[gerber_path.clone()], &[], &[],
+            &[gerber_path.clone()], &[], &[], &[],
             dir.path(), "default-preview",
             ConversionSettings::default(), None,
         ).unwrap();
         let explicit_result = gerber_inputs_to_png(
-            &[gerber_path], &[], &[],
+            &[gerber_path], &[], &[], &[],
             dir.path(), "explicit-preview",
             ConversionSettings {
                 pixels_per_mm: DEFAULT_PIXELS_PER_MM,
@@ -1276,8 +1291,8 @@ mod tests {
             }, None,
         ).unwrap();
 
-        assert_eq!(default_result.copper.width, explicit_result.copper.width);
-        assert_eq!(default_result.copper.height, explicit_result.copper.height);
+        assert_eq!(default_result.copper_top.width, explicit_result.copper_top.width);
+        assert_eq!(default_result.copper_top.height, explicit_result.copper_top.height);
     }
 
     #[test]
@@ -1320,7 +1335,7 @@ mod tests {
         ).unwrap();
 
         let err = gerber_inputs_to_png(
-            &[gerber_path], &[], &[],
+            &[gerber_path], &[], &[], &[],
             dir.path(), "large",
             ConversionSettings {
                 pixels_per_mm: 100.0,
@@ -1345,7 +1360,7 @@ mod tests {
         fs::write(&gerber_path, SIMPLE_GERBER).unwrap();
 
         let result = gerber_inputs_to_png(
-            &[gerber_path], &[], &[],
+            &[gerber_path], &[], &[], &[],
             dir.path(), "test",
             ConversionSettings {
                 pixels_per_mm: 20.0,
@@ -1353,10 +1368,10 @@ mod tests {
             }, None,
         ).unwrap();
 
-        assert_eq!(result.copper.width, result.drills.width);
-        assert_eq!(result.copper.height, result.drills.height);
-        assert_eq!(result.copper.width, result.outline.width);
-        assert_eq!(result.copper.height, result.outline.height);
+        assert_eq!(result.copper_top.width, result.drills.width);
+        assert_eq!(result.copper_top.height, result.drills.height);
+        assert_eq!(result.copper_top.width, result.outline.width);
+        assert_eq!(result.copper_top.height, result.outline.height);
     }
 
     #[test]

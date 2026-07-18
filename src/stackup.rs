@@ -117,8 +117,9 @@ impl Stackup {
         Self { layers: Vec::new() }
     }
 
-    pub fn milling_paths(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
-        let mut copper = Vec::new();
+    pub fn milling_paths(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+        let mut copper_top = Vec::new();
+        let mut copper_bottom = Vec::new();
         let mut outline = Vec::new();
         let mut drill = Vec::new();
         for layer in &self.layers {
@@ -126,13 +127,20 @@ impl Stackup {
                 continue;
             }
             match layer.effective_category() {
-                LayerCategory::Copper => copper.push(layer.path.clone()),
+                LayerCategory::Copper => {
+                    match layer.effective_side() {
+                        Side::Bottom => copper_bottom.push(layer.path.clone()),
+                        Side::All => copper_top.push(layer.path.clone()),
+                        Side::Inner(_) => {} // inner copper doesn't get milled
+                        _ => copper_top.push(layer.path.clone()),
+                    }
+                }
                 LayerCategory::Outline => outline.push(layer.path.clone()),
                 LayerCategory::Drill => drill.push(layer.path.clone()),
                 _ => {}
             }
         }
-        (copper, outline, drill)
+        (copper_top, copper_bottom, outline, drill)
     }
 }
 
@@ -356,8 +364,9 @@ mod tests {
             PathBuf::from("unknown.xyz"), LayerCategory::Unknown, Side::All,
         ));
 
-        let (copper, outline, drill) = s.milling_paths();
-        assert_eq!(copper.len(), 2);
+        let (top, bottom, outline, drill) = s.milling_paths();
+        assert_eq!(top.len(), 1, "top.gtl should be in top copper");
+        assert_eq!(bottom.len(), 1, "bot.gbl should be in bottom copper");
         assert_eq!(outline.len(), 1);
         assert_eq!(drill.len(), 1);
     }
@@ -368,8 +377,9 @@ mod tests {
         s.layers.push(LayerFile::new(
             PathBuf::from("unknown.xyz"), LayerCategory::Unknown, Side::All,
         ));
-        let (copper, outline, drill) = s.milling_paths();
-        assert!(copper.is_empty());
+        let (top, bottom, outline, drill) = s.milling_paths();
+        assert!(top.is_empty());
+        assert!(bottom.is_empty());
         assert!(outline.is_empty());
         assert!(drill.is_empty());
     }

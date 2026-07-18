@@ -46,12 +46,16 @@ pub fn sidebar<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
         file_items.push(sidebar_file_row(label, color, layer.filename(), i, layer.is_resolved()));
     }
     if state.generated_pngs.is_none() {
-        if let Some(png) = &state.loaded_png_path {
-            let name = png.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-            file_items.push(
+        let loaded_pngs: Vec<Element<'_, crate::Message>> = [
+            (state.loaded_top_png_path.as_ref(), "Top"),
+            (state.loaded_bottom_png_path.as_ref(), "Bot"),
+        ].iter().filter_map(|(path_opt, side_label)| {
+            let path = (*path_opt)?;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            Some(
                 row![
                     container(
-                        text("PNG").font(palette::MONO).size(10).color(palette::signal_green()),
+                        text(*side_label).font(palette::MONO).size(10).color(palette::signal_green()),
                     )
                     .width(Length::Fixed(32.0))
                     .padding([0, 8]),
@@ -60,8 +64,9 @@ pub fn sidebar<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
                 .spacing(4)
                 .padding([1, 8])
                 .into(),
-            );
-        }
+            )
+        }).collect();
+        file_items.extend(loaded_pngs);
     }
     let file_list = iced::widget::Column::with_children(file_items)
         .spacing(1)
@@ -217,7 +222,8 @@ fn sidebar_file_row(
 }
 
 fn files_badge(state: &crate::AppState) -> (&'static str, Color) {
-    let has_any = !state.stackup.layers.is_empty() || state.loaded_png_path.is_some();
+    let has_loaded_png = state.loaded_top_png_path.is_some() || state.loaded_bottom_png_path.is_some();
+    let has_any = !state.stackup.layers.is_empty() || has_loaded_png;
     if has_any {
         ("✓", palette::signal_green())
     } else {
