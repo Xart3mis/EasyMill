@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag for the release (e.g., v0.1.0)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+  build:
+    name: Build
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup target add ${{ matrix.target }}
+
+      - name: cargo build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
+            cp target/${{ matrix.target }}/release/easymill.exe dist/
+          else
+            cp target/${{ matrix.target }}/release/easymill dist/
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easymill-${{ matrix.target }}
+          path: dist/
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release archives
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            if [[ "$name" == easymill-* ]]; then
+              (cd "$dir" && tar czf "../../release/${name}.tar.gz" .)
+            fi
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: Release ${{ github.event.inputs.tag }}
+          draft: false
+          prerelease: false
+          files: release/*
+          generate_release_notes: true

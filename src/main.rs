@@ -222,7 +222,7 @@ async fn start_mods_server() -> u16 {
                     && !filename.contains("..")
                     && filename.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
                 if !is_safe {
-                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
+                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nAccess-Control-Allow-Origin: *\r\n\r\n").await;
                     return;
                 }
                 match tokio::fs::read(dir.join(filename)).await {
@@ -235,7 +235,7 @@ async fn start_mods_server() -> u16 {
                         let _ = stream.write_all(&data).await;
                     }
                     Err(_) => {
-                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").await;
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\n\r\n").await;
                     }
                 }
             });
