@@ -184,6 +184,7 @@ pub(crate) enum Message {
     ReRunRasterize,
     ReRunGcode,
     RunAll,
+    ToggleLayerExclude(usize),
 }
 
 fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
@@ -818,6 +819,14 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                     Some(i) if i > index => Some(i - 1),
                     other => other,
                 };
+                state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+                state.gcode_stale = state.png_to_gcode == StepState::Complete;
+                state.loaded_inputs = derive_loaded_inputs(state);
+            }
+        }
+        Message::ToggleLayerExclude(index) => {
+            if let Some(layer) = state.stackup.layers.get_mut(index) {
+                layer.excluded = !layer.excluded;
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.loaded_inputs = derive_loaded_inputs(state);

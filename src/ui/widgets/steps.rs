@@ -178,9 +178,10 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
         let cat = layer.effective_category();
         let side = layer.effective_side();
         let is_overridden = layer.user_category.is_some() || layer.user_side.is_some();
+        let is_excluded = layer.excluded;
         let name = layer.filename();
         let is_editing = state.editing_layer == Some(i);
-        file_rows.push(layer_row(i, cat, side, is_overridden, name, is_editing));
+        file_rows.push(layer_row(i, cat, side, is_overridden, is_excluded, name, is_editing));
     }
     if is_skipped {
         let png_rows: Vec<Element<'_, crate::Message>> = [

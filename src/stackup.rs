@@ -73,6 +73,7 @@ pub struct LayerFile {
     pub user_category: Option<LayerCategory>,
     pub user_side: Option<Side>,
     pub user_label: Option<String>,
+    pub excluded: bool,
 }
 
 impl LayerFile {
@@ -84,6 +85,7 @@ impl LayerFile {
             user_category: None,
             user_side: None,
             user_label: None,
+            excluded: false,
         }
     }
 
@@ -123,6 +125,9 @@ impl Stackup {
         let mut outline = Vec::new();
         let mut drill = Vec::new();
         for layer in &self.layers {
+            if layer.excluded {
+                continue;
+            }
             if !layer.is_resolved() {
                 continue;
             }

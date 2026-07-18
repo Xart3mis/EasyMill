@@ -108,6 +108,7 @@ pub fn layer_row<'a>(
     cat: LayerCategory,
     side: Side,
     is_overridden: bool,
+    is_excluded: bool,
     filename: String,
     is_editing: bool,
 ) -> Element<'a, crate::Message> {
@@ -140,6 +141,22 @@ pub fn layer_row<'a>(
     .padding([2, 5])
     .on_press(crate::Message::EditLayerToggle(index));
 
+    let filename_color = if is_excluded {
+        palette::text_muted()
+    } else {
+        palette::text_secondary()
+    };
+
+    let exclude_btn: Element<'_, crate::Message> = button(
+        text("⊘").font(palette::MONO).size(11).color(
+            if is_excluded { palette::signal_gold() } else { palette::text_muted() }
+        ),
+    )
+    .style(styles::transparent_button_style)
+    .padding([2, 5])
+    .on_press(crate::Message::ToggleLayerExclude(index))
+    .into();
+
     let reset_btn: Element<'_, crate::Message> = if is_overridden {
         button(
             text("↺").font(palette::MONO).size(10).color(palette::accent()),
@@ -157,8 +174,9 @@ pub fn layer_row<'a>(
         text(filename)
             .font(palette::MONO)
             .size(13)
-            .color(palette::text_secondary())
+            .color(filename_color)
             .width(Length::Fill),
+        exclude_btn,
         reset_btn,
         button(
             text("✕").font(palette::MONO).size(11).color(palette::text_muted()),
