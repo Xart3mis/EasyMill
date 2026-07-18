@@ -102,12 +102,12 @@ pub fn accordion<'a>(
     }
 }
 
-pub fn layer_row<'a>(
-    kind_label: &'static str,
+pub fn layer_row(
+    kind_label: String,
     kind_color: Color,
-    filename: &'a str,
+    filename: String,
     remove_msg: crate::Message,
-) -> Element<'a, crate::Message> {
+) -> Element<'static, crate::Message> {
     row![
         container(
             text(kind_label)

@@ -39,17 +39,11 @@ pub fn sidebar<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
 
     // Files sub-list
     let mut file_items: Vec<Element<'_, crate::Message>> = Vec::new();
-    for (i, path) in state.copper_paths.iter().enumerate() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        file_items.push(sidebar_file_row("Cu", palette::layer_copper(), name, crate::LayerKind::Copper, i));
-    }
-    for (i, path) in state.outline_paths.iter().enumerate() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        file_items.push(sidebar_file_row("Out", palette::layer_outline(), name, crate::LayerKind::Outline, i));
-    }
-    for (i, path) in state.drill_paths.iter().enumerate() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        file_items.push(sidebar_file_row("Drl", palette::layer_drill(), name, crate::LayerKind::Drill, i));
+    for (i, layer) in state.stackup.layers.iter().enumerate() {
+        let cat = layer.effective_category();
+        let label = format!("{} + {}", cat.label(), layer.effective_side().label());
+        let color = palette::layer_category_color(&cat);
+        file_items.push(sidebar_file_row(label, color, layer.filename(), i, layer.is_resolved()));
     }
     if state.generated_pngs.is_none() {
         if let Some(png) = &state.loaded_png_path {
@@ -191,18 +185,19 @@ fn nav_item<'a>(
     .into()
 }
 
-fn sidebar_file_row<'a>(
-    kind_label: &'static str,
-    kind_color: Color,
-    filename: &'a str,
-    kind: crate::LayerKind,
+fn sidebar_file_row(
+    label: String,
+    color: Color,
+    filename: String,
     index: usize,
-) -> Element<'a, crate::Message> {
+    resolved: bool,
+) -> Element<'static, crate::Message> {
+    let badge_color = if resolved { color } else { palette::layer_unknown() };
     row![
         container(
-            text(kind_label).font(palette::MONO).size(10).color(kind_color),
+            text(label).font(palette::MONO).size(9).color(badge_color),
         )
-        .width(Length::Fixed(28.0))
+        .width(Length::Fixed(42.0))
         .padding([0, 8]),
         text(filename)
             .font(palette::MONO)
@@ -214,7 +209,7 @@ fn sidebar_file_row<'a>(
         )
         .style(styles::transparent_button_style)
         .padding([1, 4])
-        .on_press(crate::Message::RemoveFile { layer: kind, index }),
+        .on_press(crate::Message::RemoveFile { index }),
     ]
     .spacing(2)
     .align_y(Alignment::Center)
@@ -222,10 +217,7 @@ fn sidebar_file_row<'a>(
 }
 
 fn files_badge(state: &crate::AppState) -> (&'static str, Color) {
-    let has_any = !state.copper_paths.is_empty()
-        || !state.outline_paths.is_empty()
-        || !state.drill_paths.is_empty()
-        || state.loaded_png_path.is_some();
+    let has_any = !state.stackup.layers.is_empty() || state.loaded_png_path.is_some();
     if has_any {
         ("✓", palette::signal_green())
     } else {

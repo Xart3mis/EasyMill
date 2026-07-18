@@ -102,3 +102,36 @@ pub fn layer_outline() -> Color {
 pub fn layer_drill() -> Color {
     Color::from_rgb(1.0, 0.5, 0.5)
 }
+
+pub fn layer_mask() -> Color {
+    Color::from_rgb(0.3, 0.85, 0.5)
+}
+
+pub fn layer_silk() -> Color {
+    Color::from_rgb(0.85, 0.85, 0.90)
+}
+
+pub fn layer_paste() -> Color {
+    Color::from_rgb(0.7, 0.7, 0.3)
+}
+
+pub fn layer_drawing() -> Color {
+    Color::from_rgb(0.6, 0.6, 0.6)
+}
+
+pub fn layer_unknown() -> Color {
+    Color::from_rgb(1.0, 0.2, 0.2)
+}
+
+pub fn layer_category_color(cat: &easymill::stackup::LayerCategory) -> Color {
+    match cat {
+        easymill::stackup::LayerCategory::Copper => layer_copper(),
+        easymill::stackup::LayerCategory::Soldermask => layer_mask(),
+        easymill::stackup::LayerCategory::Silkscreen => layer_silk(),
+        easymill::stackup::LayerCategory::Solderpaste => layer_paste(),
+        easymill::stackup::LayerCategory::Outline => layer_outline(),
+        easymill::stackup::LayerCategory::Drill => layer_drill(),
+        easymill::stackup::LayerCategory::Drawing => layer_drawing(),
+        easymill::stackup::LayerCategory::Unknown => layer_unknown(),
+    }
+}

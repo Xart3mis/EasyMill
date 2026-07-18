@@ -147,16 +147,15 @@ pub fn step_canvas<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message
 // --- Step card stubs (filled in Tasks 7–10) ---
 
 pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let has_gerbers = !state.copper_paths.is_empty()
-        || !state.outline_paths.is_empty()
-        || !state.drill_paths.is_empty();
-    let is_skipped = state.loaded_png_path.is_some() && !has_gerbers;
+    let (copper, outline, drill) = state.stackup.milling_paths();
+    let has_gerbers = !copper.is_empty() || !outline.is_empty() || !drill.is_empty();
+    let is_skipped = state.loaded_png_path.is_some() && state.stackup.layers.is_empty();
     let has_input = has_gerbers || state.loaded_png_path.is_some();
 
     let vs = if has_input { CardVisualState::Complete } else { CardVisualState::Active };
     let is_expanded = state.expanded_step == Some(1);
 
-    let n_files = state.copper_paths.len() + state.outline_paths.len() + state.drill_paths.len();
+    let n_files = state.stackup.layers.len();
     let summary_str: String = if is_skipped {
         let name = state.loaded_png_path.as_ref()
             .and_then(|p| p.file_name())
@@ -165,36 +164,30 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
         format!("PNG: {name}")
     } else if has_gerbers {
         let mut parts = Vec::new();
-        if !state.copper_paths.is_empty() { parts.push("Cu"); }
-        if !state.outline_paths.is_empty() { parts.push("Out"); }
-        if !state.drill_paths.is_empty() { parts.push("Drl"); }
+        if !copper.is_empty() { parts.push("Cu"); }
+        if !outline.is_empty() { parts.push("Out"); }
+        if !drill.is_empty() { parts.push("Drl"); }
         format!("{n_files} file(s) · {}", parts.join(", "))
     } else {
         "No files loaded".to_owned()
     };
 
     let mut file_rows: Vec<Element<'_, crate::Message>> = Vec::new();
-    for (i, path) in state.copper_paths.iter().enumerate() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        file_rows.push(layer_row("Cu", palette::layer_copper(), name,
-            crate::Message::RemoveFile { layer: crate::LayerKind::Copper, index: i }));
-    }
-    for (i, path) in state.outline_paths.iter().enumerate() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        file_rows.push(layer_row("Out", palette::layer_outline(), name,
-            crate::Message::RemoveFile { layer: crate::LayerKind::Outline, index: i }));
-    }
-    for (i, path) in state.drill_paths.iter().enumerate() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        file_rows.push(layer_row("Drl", palette::layer_drill(), name,
-            crate::Message::RemoveFile { layer: crate::LayerKind::Drill, index: i }));
+    for (i, layer) in state.stackup.layers.iter().enumerate() {
+        let cat = layer.effective_category();
+        let label = format!("{} + {}", cat.label(), layer.effective_side().label());
+        let color = palette::layer_category_color(&cat);
+        let name = layer.filename();
+        file_rows.push(layer_row(label, color, name,
+            crate::Message::RemoveFile { index: i }));
     }
     if is_skipped {
         let name = state.loaded_png_path.as_ref()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .unwrap_or("?");
-        file_rows.push(layer_row("PNG", palette::signal_green(), name,
+            .unwrap_or("?")
+            .to_string();
+        file_rows.push(layer_row("PNG".to_string(), palette::signal_green(), name,
             crate::Message::ClearPng));
     }
 
@@ -298,9 +291,11 @@ pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Messa
 }
 
 pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let has_gerbers = !state.copper_paths.is_empty()
-        || !state.outline_paths.is_empty()
-        || !state.drill_paths.is_empty();
+    let (has_copper, has_outline, has_drill) = {
+        let (c, o, d) = state.stackup.milling_paths();
+        (!c.is_empty(), !o.is_empty(), !d.is_empty())
+    };
+    let has_gerbers = has_copper || has_outline || has_drill;
     let is_skipped = state.loaded_png_path.is_some() && !has_gerbers;
 
     let vs = if is_skipped {
