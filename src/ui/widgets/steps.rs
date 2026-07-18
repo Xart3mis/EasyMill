@@ -133,7 +133,8 @@ pub fn step_canvas<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message
             files_step(state),
             settings_step(state),
             rasterize_step(state),
-            gcode_step(state),
+            // TODO: unhide when G-code is ready
+            // gcode_step(state),
         ]
         .spacing(12)
         .max_width(720),
@@ -214,46 +215,9 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
 
     let files_col = iced::widget::Column::with_children(file_rows).spacing(6);
 
-    let or_row = row![
-        container("").width(Length::Fill).height(Length::Fixed(1.0))
-            .style(|_: &Theme| container::Style::default()
-                .background(iced::Background::Color(Color::from_rgba(1.0,1.0,1.0,0.06)))),
-        text("or").font(palette::MONO).size(11).color(palette::text_muted()),
-        container("").width(Length::Fill).height(Length::Fixed(1.0))
-            .style(|_: &Theme| container::Style::default()
-                .background(iced::Background::Color(Color::from_rgba(1.0,1.0,1.0,0.06)))),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let load_top_btn = button(
-        text("↑  Load Top PNG instead")
-            .font(palette::MONO)
-            .size(13)
-            .color(palette::text_secondary()),
-    )
-    .style(styles::ghost_action_style)
-    .width(Length::Fill)
-    .padding([8, 12])
-    .on_press(crate::Message::LoadPng);
-
-    let load_bot_btn = button(
-        text("↑  Load Bottom PNG instead")
-            .font(palette::MONO)
-            .size(13)
-            .color(palette::text_secondary()),
-    )
-    .style(styles::ghost_action_style)
-    .width(Length::Fill)
-    .padding([8, 12])
-    .on_press(crate::Message::LoadBottomPng);
-
     let content = column![
         drop_zone(crate::Message::SelectGerberFiles),
         files_col,
-        or_row,
-        load_top_btn,
-        load_bot_btn,
     ]
     .spacing(12);
 
@@ -263,70 +227,25 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
 pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
     let is_expanded = state.expanded_step == Some(2);
     let summary = format!(
-        "{}dpi · {}mm cut · {} mm/min · Ø{}mm",
-        state.dpi_input, state.cut_z_mm_input, state.feed_rate_input, state.tool_diameter_mm_input
+        "{}dpi · mirror bot={} top={}",
+        state.dpi_input,
+        if state.mirror_bottom { "on" } else { "off" },
+        if state.mirror_bottom { "off" } else { "off" },
     );
 
-    let geometry_content = column![
+    let content = column![
         setting_field("Resolution (DPI)", &state.dpi_input, crate::Message::DpiChanged),
         button(
             text(if state.mirror_bottom { "☑ Mirror bottom traces" } else { "☐ Mirror bottom traces" })
                 .font(palette::MONO).size(12).color(palette::text_secondary()),
         )
         .style(styles::ghost_action_style)
-        .padding([7, 12])
+        .padding([8, 14])
         .width(Length::Fill)
         .on_press(crate::Message::MirrorBottomToggled(!state.mirror_bottom)),
+        // Mirror top placeholder — wired in Task 2
     ]
     .spacing(12);
-
-    let depths_content = row![
-        setting_field("Cut Z (mm)", &state.cut_z_mm_input, crate::Message::CutZChanged),
-        setting_field("Safe Z (mm)", &state.safe_z_mm_input, crate::Message::SafeZChanged),
-    ]
-    .spacing(20);
-
-    let motion_summary = format!(
-        "feed {} · plunge {} · spindle {}",
-        state.feed_rate_input, state.plunge_rate_input, state.spindle_speed_input
-    );
-    let motion_content = column![
-        row![
-            setting_field("Feed rate (mm/min)", &state.feed_rate_input, crate::Message::FeedRateChanged),
-            setting_field("Plunge (mm/min)", &state.plunge_rate_input, crate::Message::PlungeRateChanged),
-        ]
-        .spacing(20),
-        setting_field("Spindle (RPM)", &state.spindle_speed_input, crate::Message::SpindleSpeedChanged),
-    ]
-    .spacing(12);
-
-    let tooling_summary = format!(
-        "dia {} · offsets {} · stepover {}",
-        state.tool_diameter_mm_input, state.offset_number_input, state.offset_stepover_input
-    );
-    let tooling_content = column![
-        row![
-            setting_field("Tool dia. (mm)", &state.tool_diameter_mm_input, crate::Message::ToolDiameterChanged),
-            setting_field("Offsets (0=fill)", &state.offset_number_input, crate::Message::OffsetNumberChanged),
-        ]
-        .spacing(20),
-        setting_field("Stepover", &state.offset_stepover_input, crate::Message::OffsetStepoverChanged),
-    ]
-    .spacing(12);
-
-    let [geo_open, dep_open, mot_open, tool_open] = state.settings_groups_open;
-
-    let content = column![
-        accordion("GEOMETRY", String::new(), geo_open,
-            crate::Message::SettingsGroupToggled(0), geometry_content.into()),
-        accordion("DEPTHS", String::new(), dep_open,
-            crate::Message::SettingsGroupToggled(1), depths_content.into()),
-        accordion("MOTION", motion_summary, mot_open,
-            crate::Message::SettingsGroupToggled(2), motion_content.into()),
-        accordion("TOOLING", tooling_summary, tool_open,
-            crate::Message::SettingsGroupToggled(3), tooling_content.into()),
-    ]
-    .spacing(4);
 
     step_shell(2, "SETTINGS", CardVisualState::Complete, is_expanded, summary, None, content.into())
 }
