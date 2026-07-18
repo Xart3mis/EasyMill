@@ -1,95 +1,52 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag for the release (e.g., v0.1.0)"
-        required: true
-        type: string
+  push:
+    tags:
+      - 'v*'
 
 env:
-  CARGO_TERM_COLOR: always
+  EASYMILL_RELEASE: ${{ github.ref_name }}
 
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: cargo check
-        run: cargo check --all-targets
-
-  build:
-    name: Build
-    needs: check
-    runs-on: ubuntu-latest
+  release:
+    name: Build and Release
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-pc-windows-gnu
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        run: |
-          rustup target add ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Prepare artifacts
-        run: |
-          mkdir -p dist
-          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
-            cp target/${{ matrix.target }}/release/easymill.exe dist/
-          else
-            cp target/${{ matrix.target }}/release/easymill dist/
-          fi
+      - name: Build release binary
+        run: cargo build --release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: easymill-${{ matrix.target }}
-          path: dist/
+          name: easymill-${{ matrix.os }}
+          path: |
+            target/release/easymill
+            target/release/easymill.exe
 
-  release:
-    name: Release
-    needs: build
+  create-release:
+    name: Create Release
+    needs: release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-        with:
-          path: artifacts
 
-      - name: Create release archives
-        run: |
-          mkdir -p release
-          for dir in artifacts/*/; do
-            name=$(basename "$dir")
-            if [[ "$name" == easymill-* ]]; then
-              (cd "$dir" && tar czf "../../release/${name}.tar.gz" .)
-            fi
-          done
-
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: Release ${{ github.event.inputs.tag }}
-          draft: false
-          prerelease: false
-          files: release/*
+          files: |
+            easymill-ubuntu-latest/easymill
+            easymill-windows-latest/easymill.exe
           generate_release_notes: true
