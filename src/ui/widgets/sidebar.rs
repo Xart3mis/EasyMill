@@ -35,7 +35,7 @@ pub fn sidebar<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
     let nav1 = nav_item(1, "FILES", files_badge(state), state.expanded_step == Some(1));
     let nav2 = nav_item(2, "SETTINGS", settings_badge(), state.expanded_step == Some(2));
     let nav3 = nav_item(3, "RASTERIZE", rasterize_badge(state), state.expanded_step == Some(3));
-    let nav4 = nav_item(4, "G-CODE", gcode_badge(state), state.expanded_step == Some(4));
+    // let nav4 = nav_item(4, "G-CODE", gcode_badge(state), state.expanded_step == Some(4));
 
     // Files sub-list
     let mut file_items: Vec<Element<'_, crate::Message>> = Vec::new();
@@ -139,7 +139,6 @@ pub fn sidebar<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
             nav2,
             settings_summary,
             nav3,
-            nav4,
             container("").height(Length::Fill),
             make_divider(),
             container(run_btn).id(Id::new("run-all")),
@@ -246,13 +245,13 @@ fn rasterize_badge(state: &crate::AppState) -> (&'static str, Color) {
     }
 }
 
-fn gcode_badge(state: &crate::AppState) -> (&'static str, Color) {
-    if state.gcode_stale {
-        return ("⚠", palette::signal_gold());
-    }
-    match state.png_to_gcode {
-        StepState::Complete => ("✓", palette::signal_green()),
-        StepState::Running => ("●", palette::accent()),
-        _ => ("○", palette::text_muted()),
-    }
-}
+// fn gcode_badge(state: &crate::AppState) -> (&'static str, Color) {
+//     if state.gcode_stale {
+//         return ("⚠", palette::signal_gold());
+//     }
+//     match state.png_to_gcode {
+//         StepState::Complete => ("✓", palette::signal_green()),
+//         StepState::Running => ("●", palette::accent()),
+//         _ => ("○", palette::text_muted()),
+//     }
+// }

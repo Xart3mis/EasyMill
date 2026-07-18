@@ -1,9 +1,9 @@
+use crate::ui::{palette, styles};
+use easymill::stackup::{LayerCategory, Side};
 use iced::{
     Alignment, Color, Element, Length, Theme,
     widget::{button, column, container, row, text, text_input},
 };
-use easymill::stackup::{LayerCategory, Side};
-use crate::ui::{palette, styles};
 
 pub fn setting_field<'a>(
     label: &'a str,
@@ -34,7 +34,7 @@ pub fn drop_zone<'a>(on_press: crate::Message) -> Element<'a, crate::Message> {
                     .font(palette::MONO)
                     .size(13)
                     .color(palette::text_secondary()),
-                text(".GTL  .GBL  .GKO  .DRL  .TXT  … (click on Wayland)")
+                text(".GTL  .GBL  .GKO  .DRL  .TXT  …")
                     .font(palette::MONO)
                     .size(11)
                     .color(palette::text_muted()),
@@ -95,9 +95,17 @@ pub fn accordion<'a>(
     .on_press(toggle_msg);
 
     if is_open {
-        column![header, container(content).padding(iced::Padding { top: 4.0, right: 16.0, bottom: 8.0, left: 16.0 })]
-            .spacing(0)
-            .into()
+        column![
+            header,
+            container(content).padding(iced::Padding {
+                top: 4.0,
+                right: 16.0,
+                bottom: 8.0,
+                left: 16.0
+            })
+        ]
+        .spacing(0)
+        .into()
     } else {
         column![header].into()
     }
@@ -113,7 +121,11 @@ pub fn layer_row<'a>(
     is_editing: bool,
 ) -> Element<'a, crate::Message> {
     let cat_color = palette::layer_category_color(&cat);
-    let label_color = if is_overridden { palette::accent() } else { cat_color };
+    let label_color = if is_overridden {
+        palette::accent()
+    } else {
+        cat_color
+    };
     let label_text = format!("{} · {}", cat.label(), side.label());
 
     let label_btn = button(
@@ -131,7 +143,9 @@ pub fn layer_row<'a>(
     )
     .style(|_: &Theme, status: button::Status| button::Style {
         background: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-            Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.05)))
+            Some(iced::Background::Color(Color::from_rgba(
+                1.0, 1.0, 1.0, 0.05,
+            )))
         } else {
             None
         },
@@ -148,9 +162,14 @@ pub fn layer_row<'a>(
     };
 
     let exclude_btn: Element<'_, crate::Message> = button(
-        text("⊘").font(palette::MONO).size(11).color(
-            if is_excluded { palette::signal_gold() } else { palette::text_muted() }
-        ),
+        text("⊘")
+            .font(palette::MONO)
+            .size(11)
+            .color(if is_excluded {
+                palette::signal_gold()
+            } else {
+                palette::text_muted()
+            }),
     )
     .style(styles::transparent_button_style)
     .padding([2, 5])
@@ -159,7 +178,10 @@ pub fn layer_row<'a>(
 
     let reset_btn: Element<'_, crate::Message> = if is_overridden {
         button(
-            text("↺").font(palette::MONO).size(10).color(palette::accent()),
+            text("↺")
+                .font(palette::MONO)
+                .size(10)
+                .color(palette::accent()),
         )
         .style(styles::transparent_button_style)
         .padding([2, 4])
@@ -179,7 +201,10 @@ pub fn layer_row<'a>(
         exclude_btn,
         reset_btn,
         button(
-            text("✕").font(palette::MONO).size(11).color(palette::text_muted()),
+            text("✕")
+                .font(palette::MONO)
+                .size(11)
+                .color(palette::text_muted()),
         )
         .style(styles::transparent_button_style)
         .padding([2, 6])
@@ -203,18 +228,28 @@ pub fn layer_row<'a>(
             button(text(c.label()).font(palette::MONO).size(11))
                 .style(move |_: &Theme, status: button::Status| button::Style {
                     background: if is_active {
-                        Some(iced::Background::Color(Color::from_rgba(color.r, color.g, color.b, 0.18)))
+                        Some(iced::Background::Color(Color::from_rgba(
+                            color.r, color.g, color.b, 0.18,
+                        )))
                     } else if matches!(status, button::Status::Hovered) {
-                        Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.05)))
+                        Some(iced::Background::Color(Color::from_rgba(
+                            1.0, 1.0, 1.0, 0.05,
+                        )))
                     } else {
                         None
                     },
                     border: if is_active {
                         iced::border::rounded(4.0).color(color).width(1.0)
                     } else {
-                        iced::border::rounded(4.0).color(Color::from_rgba(1.0, 1.0, 1.0, 0.08)).width(1.0)
+                        iced::border::rounded(4.0)
+                            .color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
+                            .width(1.0)
                     },
-                    text_color: if is_active { color } else { palette::text_muted() },
+                    text_color: if is_active {
+                        color
+                    } else {
+                        palette::text_muted()
+                    },
                     ..Default::default()
                 })
                 .padding([3, 7])
@@ -237,18 +272,30 @@ pub fn layer_row<'a>(
             button(text(s.label()).font(palette::MONO).size(11))
                 .style(move |_: &Theme, status: button::Status| button::Style {
                     background: if is_active {
-                        Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.10)))
+                        Some(iced::Background::Color(Color::from_rgba(
+                            1.0, 1.0, 1.0, 0.10,
+                        )))
                     } else if matches!(status, button::Status::Hovered) {
-                        Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.04)))
+                        Some(iced::Background::Color(Color::from_rgba(
+                            1.0, 1.0, 1.0, 0.04,
+                        )))
                     } else {
                         None
                     },
                     border: if is_active {
-                        iced::border::rounded(4.0).color(Color::from_rgba(1.0, 1.0, 1.0, 0.30)).width(1.0)
+                        iced::border::rounded(4.0)
+                            .color(Color::from_rgba(1.0, 1.0, 1.0, 0.30))
+                            .width(1.0)
                     } else {
-                        iced::border::rounded(4.0).color(Color::from_rgba(1.0, 1.0, 1.0, 0.08)).width(1.0)
+                        iced::border::rounded(4.0)
+                            .color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
+                            .width(1.0)
                     },
-                    text_color: if is_active { active_color } else { palette::text_muted() },
+                    text_color: if is_active {
+                        active_color
+                    } else {
+                        palette::text_muted()
+                    },
                     ..Default::default()
                 })
                 .padding([3, 7])
@@ -260,14 +307,20 @@ pub fn layer_row<'a>(
     let picker = container(
         column![
             row![
-                text("Type").font(palette::MONO).size(10).color(palette::text_muted())
+                text("Type")
+                    .font(palette::MONO)
+                    .size(10)
+                    .color(palette::text_muted())
                     .width(Length::Fixed(36.0)),
                 iced::widget::Row::with_children(cat_chips).spacing(4),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
             row![
-                text("Side").font(palette::MONO).size(10).color(palette::text_muted())
+                text("Side")
+                    .font(palette::MONO)
+                    .size(10)
+                    .color(palette::text_muted())
                     .width(Length::Fixed(36.0)),
                 iced::widget::Row::with_children(side_chips).spacing(4),
             ]
@@ -276,9 +329,12 @@ pub fn layer_row<'a>(
         ]
         .spacing(6),
     )
-    .padding(iced::Padding { top: 8.0, right: 4.0, bottom: 4.0, left: 4.0 });
+    .padding(iced::Padding {
+        top: 8.0,
+        right: 4.0,
+        bottom: 4.0,
+        left: 4.0,
+    });
 
-    column![top_row, picker]
-        .spacing(2)
-        .into()
+    column![top_row, picker].spacing(2).into()
 }
