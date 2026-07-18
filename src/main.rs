@@ -4,7 +4,7 @@ use easymill::conversion::{
 };
 use easymill::logging::init_logging;
 use iced::{
-    self, Element, Length, Subscription, Task, Theme,
+    self, Element, Length, Subscription, Task, Theme, event,
     widget::{container, scrollable},
 };
 use easymill::stackup::{Stackup, LayerFile, LayerCategory, Side};
@@ -151,6 +151,7 @@ pub(crate) enum Message {
     ClearPng,
     StepToggled(u8),
     RemoveFile { index: usize },
+    FileDropped(PathBuf),
     SettingsGroupToggled(usize),
     ReRunRasterize,
     ReRunGcode,
@@ -638,6 +639,19 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
             }
         }
+        Message::FileDropped(path) => {
+            let detector = easymill::stackup::LayerDetector::new();
+            let filename = path.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let (cat, side) = detector.detect(&filename);
+            state.stackup.layers.push(LayerFile::new(path, cat, side));
+            state.loaded_inputs = derive_loaded_inputs(state);
+            state.gerber_to_png = StepState::Ready;
+            state.status = format!("File dropped: {filename}");
+            state.rasterize_stale = state.gerber_to_png == StepState::Complete;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
+        }
         Message::OverrideLayer { index, category, side } => {
             if let Some(layer) = state.stackup.layers.get_mut(index) {
                 layer.user_category = if layer.auto_category == category { None } else { Some(category) };
@@ -712,12 +726,24 @@ fn view(state: &AppState) -> Element<'_, Message> {
 }
 
 fn subscription(state: &AppState) -> Subscription<Message> {
-    if state.gerber_to_png == StepState::Running || state.png_to_gcode == StepState::Running {
+    let progress_sub = if state.gerber_to_png == StepState::Running || state.png_to_gcode == StepState::Running {
         iced::time::every(Duration::from_millis(100))
             .map(|_| Message::PollProgress)
     } else {
         Subscription::none()
-    }
+    };
+
+    let dnd_sub = event::listen_with(
+        |event: iced::event::Event, _status: iced::event::Status, _window: iced::window::Id| {
+            if let iced::event::Event::Window(iced::window::Event::FileDropped(path)) = event {
+                Some(Message::FileDropped(path))
+            } else {
+                None
+            }
+        },
+    );
+
+    Subscription::batch(vec![progress_sub, dnd_sub])
 }
 
 pub fn main() -> iced::Result {
