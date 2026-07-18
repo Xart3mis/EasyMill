@@ -29,14 +29,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: easymill-${{ matrix.os }}
-          path: |
-            target/release/easymill
-            target/release/easymill.exe
+          path: ${{ matrix.os == 'windows-latest' && 'target/release/easymill.exe' || 'target/release/easymill' }}
 
   create-release:
     name: Create Release
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
