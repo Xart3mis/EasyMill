@@ -1,14 +1,14 @@
 use easymill::conversion::{
-    ConversionSettings, DEFAULT_DPI, MM_PER_INCH, GcodeResult, PngLayerResults,
+    ConversionSettings, DEFAULT_DPI, GcodeResult, MM_PER_INCH, PngLayerResults,
     gerber_inputs_to_png, png_to_gcode,
 };
 use easymill::logging::init_logging;
-use webbrowser;
+use easymill::stackup::{LayerCategory, LayerFile, Side, Stackup};
 use iced::{
-    self, Element, Length, Subscription, Task, Theme, event,
+    self, Element, Length, Rectangle, Subscription, Task, Theme, event,
     widget::{container, scrollable},
 };
-use easymill::stackup::{Stackup, LayerFile, LayerCategory, Side};
+use iced_tour::{TourManager, TourManagerMessage, TourStep, TourTheme, tour_manager_overlay};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +16,34 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::task::spawn_blocking;
 use tracing::{error, info, warn};
+use webbrowser;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn version_file_path() -> Option<PathBuf> {
+    let base = dirs::data_dir()?;
+    Some(base.join("easymill").join("seen-version"))
+}
+
+fn is_new_version() -> bool {
+    let path = match version_file_path() {
+        Some(p) => p,
+        None => return true,
+    };
+    match fs::read_to_string(&path) {
+        Ok(stored) => stored.trim() != VERSION,
+        Err(_) => true,
+    }
+}
+
+fn mark_version_seen() {
+    if let Some(path) = version_file_path() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, VERSION);
+    }
+}
 
 mod ui;
 
@@ -33,7 +61,6 @@ pub(crate) enum GcodeSide {
     Top,
     Bottom,
 }
-
 
 pub(crate) struct AppState {
     pub(crate) stackup: Stackup,
@@ -71,6 +98,8 @@ pub(crate) struct AppState {
     pub(crate) gcode_stale: bool,
     pub(crate) expanded_step: Option<u8>,
     pub(crate) settings_groups_open: [bool; 4],
+    pub(crate) tour_manager: TourManager,
+    pub(crate) tour_theme: TourTheme,
     pub(crate) mods_server_port: Option<u16>,
     pub(crate) pending_mods_open: Option<std::path::PathBuf>,
 }
@@ -113,6 +142,41 @@ impl Default for AppState {
             gcode_stale: false,
             expanded_step: Some(1),
             settings_groups_open: [true, true, false, false],
+            tour_manager: {
+                let mut tm = TourManager::new()
+                    .add_tour("welcome", vec![
+                        TourStep::new(
+                            "Welcome to EasyMill",
+                            "This quick walkthrough will guide you through converting Gerber PCB files into CNC G-code for milling."
+                        ),
+                        TourStep::new(
+                            "Step 1: Load Files",
+                            "Start by clicking the drop zone or dragging Gerber / Excellon files here. EasyMill auto-detects copper, outline, and drill layers."
+                        ).target_id("step-1"),
+                        TourStep::new(
+                            "Step 2: Configure Settings",
+                            "Fine-tune milling parameters: DPI resolution, cut depths, feed rates, spindle speed, and tool diameter."
+                        ).target_id("step-2"),
+                        TourStep::new(
+                            "Step 3: Rasterize",
+                            "Convert your Gerber data into PNG layers for traces, outline, and drills."
+                        ).target_id("step-3"),
+                        TourStep::new(
+                            "Run the Pipeline",
+                            "Click 'Run All' in the sidebar to rasterize and generate G-code in one go."
+                        ).target_id("run-all"),
+                        TourStep::new(
+                            "You're Ready!",
+                            "Load your Gerber files and start milling. The sidebar shows your layers and pipeline status at a glance."
+                        ),
+                    ]);
+                if is_new_version() {
+                    tm.start("welcome");
+                    mark_version_seen();
+                }
+                tm
+            },
+            tour_theme: TourTheme::dark(),
             mods_server_port: None,
             pending_mods_open: None,
         }
@@ -143,7 +207,11 @@ impl AppState {
 pub(crate) enum Message {
     SelectGerberFiles,
     GerberFilesPicked(Option<Vec<PathBuf>>),
-    OverrideLayer { index: usize, category: LayerCategory, side: Side },
+    OverrideLayer {
+        index: usize,
+        category: LayerCategory,
+        side: Side,
+    },
     LoadPng,
     LoadTopPngPicked(Option<PathBuf>),
     LoadBottomPng,
@@ -179,10 +247,18 @@ pub(crate) enum Message {
     OffsetStepoverChanged(String),
     ClearPng,
     StepToggled(u8),
-    RemoveFile { index: usize },
+    RemoveFile {
+        index: usize,
+    },
     EditLayerToggle(usize),
-    SetLayerCategory { index: usize, category: LayerCategory },
-    SetLayerSide { index: usize, side: Side },
+    SetLayerCategory {
+        index: usize,
+        category: LayerCategory,
+    },
+    SetLayerSide {
+        index: usize,
+        side: Side,
+    },
     ResetLayerOverride(usize),
     FileDropped(PathBuf),
     OpenInMods(PathBuf),
@@ -192,6 +268,8 @@ pub(crate) enum Message {
     ReRunGcode,
     RunAll,
     ToggleLayerExclude(usize),
+    Tour(TourManagerMessage),
+    TourBoundsResolved(Rectangle),
 }
 
 async fn start_mods_server() -> u16 {
@@ -206,7 +284,9 @@ async fn start_mods_server() -> u16 {
 
     tokio::spawn(async move {
         loop {
-            let Ok((mut stream, _)) = listener.accept().await else { continue };
+            let Ok((mut stream, _)) = listener.accept().await else {
+                continue;
+            };
             let dir = render_dir.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 2048];
@@ -220,9 +300,15 @@ async fn start_mods_server() -> u16 {
                 let filename = raw_path.trim_start_matches('/');
                 let is_safe = !filename.is_empty()
                     && !filename.contains("..")
-                    && filename.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+                    && filename
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
                 if !is_safe {
-                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nAccess-Control-Allow-Origin: *\r\n\r\n").await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                        )
+                        .await;
                     return;
                 }
                 match tokio::fs::read(dir.join(filename)).await {
@@ -235,7 +321,11 @@ async fn start_mods_server() -> u16 {
                         let _ = stream.write_all(&data).await;
                     }
                     Err(_) => {
-                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\n\r\n").await;
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                            )
+                            .await;
                     }
                 }
             });
@@ -246,11 +336,16 @@ async fn start_mods_server() -> u16 {
 }
 
 fn derive_loaded_inputs(state: &AppState) -> Vec<String> {
-    state.stackup.layers.iter().map(|layer| {
-        let cat = layer.effective_category();
-        let side = layer.effective_side();
-        format!("[{} + {}] {}", cat.label(), side.label(), layer.filename())
-    }).collect()
+    state
+        .stackup
+        .layers
+        .iter()
+        .map(|layer| {
+            let cat = layer.effective_category();
+            let side = layer.effective_side();
+            format!("[{} + {}] {}", cat.label(), side.label(), layer.filename())
+        })
+        .collect()
 }
 
 fn update(state: &mut AppState, message: Message) -> Task<Message> {
@@ -300,15 +395,24 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::ConvertToPng => {
             let (copper_top, copper_bottom, outline, drill) = state.stackup.milling_paths();
 
-            if copper_top.is_empty() && copper_bottom.is_empty() && outline.is_empty() && drill.is_empty() {
+            if copper_top.is_empty()
+                && copper_bottom.is_empty()
+                && outline.is_empty()
+                && drill.is_empty()
+            {
                 warn!("convert to png requested with no inputs loaded");
                 state.status = "Load Gerber files before converting.".to_owned();
                 return Task::none();
             }
 
             for layer in &state.stackup.layers {
-                if layer.effective_category() == LayerCategory::Copper && layer.effective_side() == Side::All {
-                    warn!("Layer {} has Side::All — treating as top for copper", layer.filename());
+                if layer.effective_category() == LayerCategory::Copper
+                    && layer.effective_side() == Side::All
+                {
+                    warn!(
+                        "Layer {} has Side::All — treating as top for copper",
+                        layer.filename()
+                    );
                 }
             }
 
@@ -323,23 +427,28 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             let png_progress = state.png_progress.clone();
             png_progress.store(0, Ordering::Relaxed);
 
-            let on_progress: Option<easymill::conversion::ProgressFn> = Some(Box::new(move |p: f32| {
-                png_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
-            }));
+            let on_progress: Option<easymill::conversion::ProgressFn> =
+                Some(Box::new(move |p: f32| {
+                    png_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
+                }));
 
             return Task::perform(
                 async move {
                     spawn_blocking(move || {
                         gerber_inputs_to_png(
-                            &copper_top, &copper_bottom, &outline, &drill,
-                            &output_dir, &output_stem, settings, on_progress,
+                            &copper_top,
+                            &copper_bottom,
+                            &outline,
+                            &drill,
+                            &output_dir,
+                            &output_stem,
+                            settings,
+                            on_progress,
                         )
                         .map_err(|e| e.to_string())
                     })
                     .await
-                    .unwrap_or_else(|join_err| {
-                        Err(format!("Blocking task failed: {join_err}"))
-                    })
+                    .unwrap_or_else(|join_err| Err(format!("Blocking task failed: {join_err}")))
                 },
                 Message::ConvertToPngFinished,
             );
@@ -524,9 +633,10 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             let gcode_progress = state.gcode_progress.clone();
             gcode_progress.store(0, Ordering::Relaxed);
 
-            let on_progress: Option<easymill::conversion::ProgressFn> = Some(Box::new(move |p: f32| {
-                gcode_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
-            }));
+            let on_progress: Option<easymill::conversion::ProgressFn> =
+                Some(Box::new(move |p: f32| {
+                    gcode_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
+                }));
 
             return Task::perform(
                 async move {
@@ -535,9 +645,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                             .map_err(|e| e.to_string())
                     })
                     .await
-                    .unwrap_or_else(|join_err| {
-                        Err(format!("Blocking task failed: {join_err}"))
-                    })
+                    .unwrap_or_else(|join_err| Err(format!("Blocking task failed: {join_err}")))
                 },
                 Message::GenerateGcodeFinished,
             );
@@ -611,9 +719,10 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             let gcode_progress = state.gcode_progress.clone();
             gcode_progress.store(0, Ordering::Relaxed);
 
-            let on_progress: Option<easymill::conversion::ProgressFn> = Some(Box::new(move |p: f32| {
-                gcode_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
-            }));
+            let on_progress: Option<easymill::conversion::ProgressFn> =
+                Some(Box::new(move |p: f32| {
+                    gcode_progress.store((p * 1000.0) as u32, Ordering::Relaxed);
+                }));
 
             return Task::perform(
                 async move {
@@ -625,9 +734,7 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                         Ok((top_result, bottom_result))
                     })
                     .await
-                    .unwrap_or_else(|join_err| {
-                        Err(format!("Blocking task failed: {join_err}"))
-                    })
+                    .unwrap_or_else(|join_err| Err(format!("Blocking task failed: {join_err}")))
                 },
                 |result| match result {
                     Ok((top, bottom)) => Message::GenerateBothGcodeFinished(Ok((top, bottom))),
@@ -654,7 +761,10 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 let secs = (time_secs % 60.0) as u32;
                 state.estimated_time = format!("{hours:02}:{mins:02}:{secs:02}");
                 state.cut_distance = format!("{:.1} mm", gcode_result.cut_distance_mm);
-                state.board_dimensions = format!("{:.1} x {:.1} mm", gcode_result.width_mm, gcode_result.height_mm);
+                state.board_dimensions = format!(
+                    "{:.1} x {:.1} mm",
+                    gcode_result.width_mm, gcode_result.height_mm
+                );
 
                 state.status = "Generated G-code for both sides.".to_owned();
             }
@@ -695,7 +805,10 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             if let Some(path) = path {
                 let gcode = match state.active_gcode_side {
                     GcodeSide::Top => state.generated_top_gcode.as_ref().map(|r| r.gcode.clone()),
-                    GcodeSide::Bottom => state.generated_bottom_gcode.as_ref().map(|r| r.gcode.clone()),
+                    GcodeSide::Bottom => state
+                        .generated_bottom_gcode
+                        .as_ref()
+                        .map(|r| r.gcode.clone()),
                 };
                 if let Some(gcode) = gcode {
                     match fs::write(&path, &gcode) {
@@ -731,7 +844,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             state.gcode_side_indicator = match side {
                 GcodeSide::Top => "Top",
                 GcodeSide::Bottom => "Bottom",
-            }.to_owned();
+            }
+            .to_owned();
             if let Some(gcode_result) = match side {
                 GcodeSide::Top => state.generated_top_gcode.as_ref(),
                 GcodeSide::Bottom => state.generated_bottom_gcode.as_ref(),
@@ -742,7 +856,10 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 let secs = (time_secs % 60.0) as u32;
                 state.estimated_time = format!("{hours:02}:{mins:02}:{secs:02}");
                 state.cut_distance = format!("{:.1} mm", gcode_result.cut_distance_mm);
-                state.board_dimensions = format!("{:.1} x {:.1} mm", gcode_result.width_mm, gcode_result.height_mm);
+                state.board_dimensions = format!(
+                    "{:.1} x {:.1} mm",
+                    gcode_result.width_mm, gcode_result.height_mm
+                );
             }
         }
         Message::MirrorBottomToggled(val) => {
@@ -817,7 +934,11 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::StepToggled(n) => {
-            state.expanded_step = if state.expanded_step == Some(n) { None } else { Some(n) };
+            state.expanded_step = if state.expanded_step == Some(n) {
+                None
+            } else {
+                Some(n)
+            };
         }
         Message::SelectGerberFiles => {
             return Task::perform(
@@ -834,7 +955,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
                 let count = files.len();
                 let detector = easymill::stackup::LayerDetector::new();
                 for path in files {
-                    let filename = path.file_name()
+                    let filename = path
+                        .file_name()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let (cat, side) = detector.detect(&filename);
@@ -849,7 +971,8 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::FileDropped(path) => {
             let detector = easymill::stackup::LayerDetector::new();
-            let filename = path.file_name()
+            let filename = path
+                .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let (cat, side) = detector.detect(&filename);
@@ -860,10 +983,22 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             state.rasterize_stale = state.gerber_to_png == StepState::Complete;
             state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
-        Message::OverrideLayer { index, category, side } => {
+        Message::OverrideLayer {
+            index,
+            category,
+            side,
+        } => {
             if let Some(layer) = state.stackup.layers.get_mut(index) {
-                layer.user_category = if layer.auto_category == category { None } else { Some(category) };
-                layer.user_side = if layer.auto_side == side { None } else { Some(side) };
+                layer.user_category = if layer.auto_category == category {
+                    None
+                } else {
+                    Some(category)
+                };
+                layer.user_side = if layer.auto_side == side {
+                    None
+                } else {
+                    Some(side)
+                };
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.loaded_inputs = derive_loaded_inputs(state);
@@ -891,11 +1026,19 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             }
         }
         Message::EditLayerToggle(i) => {
-            state.editing_layer = if state.editing_layer == Some(i) { None } else { Some(i) };
+            state.editing_layer = if state.editing_layer == Some(i) {
+                None
+            } else {
+                Some(i)
+            };
         }
         Message::SetLayerCategory { index, category } => {
             if let Some(layer) = state.stackup.layers.get_mut(index) {
-                layer.user_category = if layer.auto_category == category { None } else { Some(category) };
+                layer.user_category = if layer.auto_category == category {
+                    None
+                } else {
+                    Some(category)
+                };
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.loaded_inputs = derive_loaded_inputs(state);
@@ -903,7 +1046,11 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::SetLayerSide { index, side } => {
             if let Some(layer) = state.stackup.layers.get_mut(index) {
-                layer.user_side = if layer.auto_side == side { None } else { Some(side) };
+                layer.user_side = if layer.auto_side == side {
+                    None
+                } else {
+                    Some(side)
+                };
                 state.rasterize_stale = state.gerber_to_png == StepState::Complete;
                 state.gcode_stale = state.png_to_gcode == StepState::Complete;
                 state.loaded_inputs = derive_loaded_inputs(state);
@@ -962,25 +1109,42 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
             state.gcode_stale = false;
             return update(state, Message::GenerateGcode);
         }
+        Message::Tour(msg) => {
+            state.tour_manager.update(msg);
+            return state
+                .tour_manager
+                .resolve_bounds_task(Message::TourBoundsResolved);
+        }
+        Message::TourBoundsResolved(bounds) => {
+            state
+                .tour_manager
+                .set_resolved_bounds_animated(bounds, &state.tour_theme.animation);
+        }
         Message::RunAll => {
             let (copper_top, copper_bottom, outline, drill) = state.stackup.milling_paths();
-            let has_gerbers = !copper_top.is_empty() || !copper_bottom.is_empty() || !outline.is_empty() || !drill.is_empty();
+            let has_gerbers = !copper_top.is_empty()
+                || !copper_bottom.is_empty()
+                || !outline.is_empty()
+                || !drill.is_empty();
             let rasterize_needed = has_gerbers
                 && (state.gerber_to_png != StepState::Complete || state.rasterize_stale);
-            let has_both_pngs = state.loaded_top_png_path.is_some() && state.loaded_bottom_png_path.is_some();
-            let has_any_png = state.loaded_top_png_path.is_some() || state.loaded_bottom_png_path.is_some();
-            let gcode_needed = has_any_png
-                && (state.png_to_gcode != StepState::Complete || state.gcode_stale);
+            //TODO: GCode Generation Under Development
+            // let has_both_pngs =
+            //     state.loaded_top_png_path.is_some() && state.loaded_bottom_png_path.is_some();
+            // let has_any_png =
+            //     state.loaded_top_png_path.is_some() || state.loaded_bottom_png_path.is_some();
+            // let gcode_needed =
+            //     has_any_png && (state.png_to_gcode != StepState::Complete || state.gcode_stale);
             if rasterize_needed {
                 state.rasterize_stale = false;
                 return update(state, Message::ConvertToPng);
-            } else if gcode_needed && has_both_pngs {
-                state.gcode_stale = false;
-                return update(state, Message::GenerateBothGcode);
+            } /*else if gcode_needed && has_both_pngs {
+            state.gcode_stale = false;
+            return update(state, Message::GenerateBothGcode);
             } else if gcode_needed {
-                state.gcode_stale = false;
-                return update(state, Message::GenerateGcode);
-            }
+            state.gcode_stale = false;
+            return update(state, Message::GenerateGcode);
+            }*/
         }
     }
 
@@ -995,27 +1159,35 @@ fn view(state: &AppState) -> Element<'_, Message> {
     use ui::{sidebar, step_canvas};
 
     let layout = iced::widget::row![
-        sidebar(state),
+        container(sidebar(state)).id(iced::widget::Id::new("sidebar")),
         scrollable(step_canvas(state))
             .height(Length::Fill)
             .width(Length::Fill),
     ]
     .height(Length::Fill);
 
-    container(layout)
+    let content = container(layout)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(ui::styles::app_style())
+        .style(ui::styles::app_style());
+
+    iced::widget::Stack::new()
+        .push(content)
+        .push(tour_manager_overlay(
+            &state.tour_manager,
+            &state.tour_theme,
+            Message::Tour,
+        ))
         .into()
 }
 
 fn subscription(state: &AppState) -> Subscription<Message> {
-    let progress_sub = if state.gerber_to_png == StepState::Running || state.png_to_gcode == StepState::Running {
-        iced::time::every(Duration::from_millis(100))
-            .map(|_| Message::PollProgress)
-    } else {
-        Subscription::none()
-    };
+    let progress_sub =
+        if state.gerber_to_png == StepState::Running || state.png_to_gcode == StepState::Running {
+            iced::time::every(Duration::from_millis(100)).map(|_| Message::PollProgress)
+        } else {
+            Subscription::none()
+        };
 
     // Note: FileDropped events require X11; on Wayland use WINIT_UNIX_BACKEND=x11.
     // We accept events regardless of status because drop events are always Ignored.
