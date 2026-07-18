@@ -185,7 +185,7 @@ pub fn layer_row<'a>(
         .padding([2, 6])
         .on_press(crate::Message::RemoveFile { index }),
     ]
-    .spacing(6)
+    .spacing(8)
     .align_y(Alignment::Center)
     .into();
 
