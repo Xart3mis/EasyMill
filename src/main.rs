@@ -182,6 +182,7 @@ pub(crate) enum Message {
     ToolDiameterChanged(String),
     OffsetNumberChanged(String),
     OffsetStepoverChanged(String),
+    ClearPng,
     StepToggled(u8),
     RemoveFile { layer: LayerKind, index: usize },
     SettingsGroupToggled(usize),
@@ -632,6 +633,12 @@ fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::OffsetStepoverChanged(val) => {
             state.offset_stepover_input = val;
+            state.gcode_stale = state.png_to_gcode == StepState::Complete;
+        }
+        Message::ClearPng => {
+            state.loaded_png_path = None;
+            state.gerber_to_png = StepState::Idle;
+            state.png_to_gcode = StepState::Ready;
             state.gcode_stale = state.png_to_gcode == StepState::Complete;
         }
         Message::StepToggled(n) => {

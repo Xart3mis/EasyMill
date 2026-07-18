@@ -4,6 +4,7 @@ use iced::{
 };
 use crate::StepState;
 use crate::ui::{palette, styles};
+use super::components::{drop_zone, layer_row};
 
 /// Visual state of a step card — drives border/background color.
 pub(crate) enum CardVisualState {
@@ -145,22 +146,91 @@ pub fn step_canvas<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message
 // --- Step card stubs (filled in Tasks 7–10) ---
 
 pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
-    let has_input = !state.copper_paths.is_empty()
+    let has_gerbers = !state.copper_paths.is_empty()
         || !state.outline_paths.is_empty()
-        || !state.drill_paths.is_empty()
-        || state.loaded_png_path.is_some();
+        || !state.drill_paths.is_empty();
+    let is_skipped = state.loaded_png_path.is_some() && !has_gerbers;
+    let has_input = has_gerbers || state.loaded_png_path.is_some();
+
     let vs = if has_input { CardVisualState::Complete } else { CardVisualState::Active };
     let is_expanded = state.expanded_step == Some(1);
-    let summary = if has_input {
-        let n = state.copper_paths.len() + state.outline_paths.len() + state.drill_paths.len();
-        format!("{n} file(s) loaded")
+
+    let n_files = state.copper_paths.len() + state.outline_paths.len() + state.drill_paths.len();
+    let summary_str: String = if is_skipped {
+        let name = state.loaded_png_path.as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        format!("PNG: {name}")
+    } else if has_gerbers {
+        let mut parts = Vec::new();
+        if !state.copper_paths.is_empty() { parts.push("Cu"); }
+        if !state.outline_paths.is_empty() { parts.push("Out"); }
+        if !state.drill_paths.is_empty() { parts.push("Drl"); }
+        format!("{n_files} file(s) · {}", parts.join(", "))
     } else {
         "No files loaded".to_owned()
     };
-    step_shell(
-        1, "FILES", vs, is_expanded, summary, None,
-        text("(files content — Task 7)").font(palette::MONO).size(13).color(palette::text_muted()).into(),
+
+    let mut file_rows: Vec<Element<'_, crate::Message>> = Vec::new();
+    for (i, path) in state.copper_paths.iter().enumerate() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        file_rows.push(layer_row("Cu", palette::layer_copper(), name,
+            crate::Message::RemoveFile { layer: crate::LayerKind::Copper, index: i }));
+    }
+    for (i, path) in state.outline_paths.iter().enumerate() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        file_rows.push(layer_row("Out", palette::layer_outline(), name,
+            crate::Message::RemoveFile { layer: crate::LayerKind::Outline, index: i }));
+    }
+    for (i, path) in state.drill_paths.iter().enumerate() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        file_rows.push(layer_row("Drl", palette::layer_drill(), name,
+            crate::Message::RemoveFile { layer: crate::LayerKind::Drill, index: i }));
+    }
+    if is_skipped {
+        let name = state.loaded_png_path.as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        file_rows.push(layer_row("PNG", palette::signal_green(), name,
+            crate::Message::ClearPng));
+    }
+
+    let files_col = iced::widget::Column::with_children(file_rows).spacing(6);
+
+    let or_row = row![
+        container("").width(Length::Fill).height(Length::Fixed(1.0))
+            .style(|_: &Theme| container::Style::default()
+                .background(iced::Background::Color(Color::from_rgba(1.0,1.0,1.0,0.06)))),
+        text("or").font(palette::MONO).size(11).color(palette::text_muted()),
+        container("").width(Length::Fill).height(Length::Fixed(1.0))
+            .style(|_: &Theme| container::Style::default()
+                .background(iced::Background::Color(Color::from_rgba(1.0,1.0,1.0,0.06)))),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let load_png_btn = button(
+        text("↑  Load existing PNG instead")
+            .font(palette::MONO)
+            .size(13)
+            .color(palette::text_secondary()),
     )
+    .style(styles::ghost_action_style)
+    .width(Length::Fill)
+    .padding([8, 12])
+    .on_press(crate::Message::LoadPng);
+
+    let content = column![
+        drop_zone(crate::Message::SelectCopperFiles),
+        files_col,
+        or_row,
+        load_png_btn,
+    ]
+    .spacing(12);
+
+    step_shell(1, "FILES", vs, is_expanded, summary_str, None, content.into())
 }
 
 pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
