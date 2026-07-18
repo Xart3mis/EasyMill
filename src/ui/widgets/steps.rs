@@ -217,7 +217,7 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
     .on_press(crate::Message::LoadPng);
 
     let content = column![
-        drop_zone(crate::Message::SelectCopperFiles),
+        drop_zone(crate::Message::SelectGerberFiles),
         files_col,
         or_row,
         load_png_btn,
