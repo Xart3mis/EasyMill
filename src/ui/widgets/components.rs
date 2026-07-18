@@ -53,7 +53,7 @@ pub fn drop_zone<'a>(on_press: crate::Message) -> Element<'a, crate::Message> {
 
 pub fn accordion<'a>(
     label: &'a str,
-    summary: &'a str,
+    summary: String,
     is_open: bool,
     toggle_msg: crate::Message,
     content: Element<'a, crate::Message>,
@@ -63,7 +63,8 @@ pub fn accordion<'a>(
         .size(12)
         .color(palette::text_muted());
 
-    let summary_widget: Element<'_, crate::Message> = if !is_open && !summary.is_empty() {
+    let show_summary = !summary.is_empty();
+    let summary_widget: Element<'_, crate::Message> = if !is_open && show_summary {
         text(summary)
             .font(palette::MONO)
             .size(11)

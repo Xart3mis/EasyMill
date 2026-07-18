@@ -4,7 +4,7 @@ use iced::{
 };
 use crate::StepState;
 use crate::ui::{palette, styles};
-use super::components::{drop_zone, layer_row};
+use super::components::{accordion, drop_zone, layer_row, setting_field};
 
 /// Visual state of a step card — drives border/background color.
 pub(crate) enum CardVisualState {
@@ -236,13 +236,64 @@ pub fn files_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message>
 pub fn settings_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
     let is_expanded = state.expanded_step == Some(2);
     let summary = format!(
-        "{}dpi · {}mm cut · {} mm/min",
-        state.dpi_input, state.cut_z_mm_input, state.feed_rate_input
+        "{}dpi · {}mm cut · {} mm/min · Ø{}mm",
+        state.dpi_input, state.cut_z_mm_input, state.feed_rate_input, state.tool_diameter_mm_input
     );
-    step_shell(
-        2, "SETTINGS", CardVisualState::Complete, is_expanded, summary, None,
-        text("(settings content — Task 8)").font(palette::MONO).size(13).color(palette::text_muted()).into(),
-    )
+
+    let geometry_content = column![
+        setting_field("Resolution (DPI)", &state.dpi_input, crate::Message::DpiChanged),
+    ]
+    .spacing(12);
+
+    let depths_content = row![
+        setting_field("Cut Z (mm)", &state.cut_z_mm_input, crate::Message::CutZChanged),
+        setting_field("Safe Z (mm)", &state.safe_z_mm_input, crate::Message::SafeZChanged),
+    ]
+    .spacing(20);
+
+    let motion_summary = format!(
+        "feed {} · plunge {} · spindle {}",
+        state.feed_rate_input, state.plunge_rate_input, state.spindle_speed_input
+    );
+    let motion_content = column![
+        row![
+            setting_field("Feed rate (mm/min)", &state.feed_rate_input, crate::Message::FeedRateChanged),
+            setting_field("Plunge (mm/min)", &state.plunge_rate_input, crate::Message::PlungeRateChanged),
+        ]
+        .spacing(20),
+        setting_field("Spindle (RPM)", &state.spindle_speed_input, crate::Message::SpindleSpeedChanged),
+    ]
+    .spacing(12);
+
+    let tooling_summary = format!(
+        "dia {} · offsets {} · stepover {}",
+        state.tool_diameter_mm_input, state.offset_number_input, state.offset_stepover_input
+    );
+    let tooling_content = column![
+        row![
+            setting_field("Tool dia. (mm)", &state.tool_diameter_mm_input, crate::Message::ToolDiameterChanged),
+            setting_field("Offsets (0=fill)", &state.offset_number_input, crate::Message::OffsetNumberChanged),
+        ]
+        .spacing(20),
+        setting_field("Stepover", &state.offset_stepover_input, crate::Message::OffsetStepoverChanged),
+    ]
+    .spacing(12);
+
+    let [geo_open, dep_open, mot_open, tool_open] = state.settings_groups_open;
+
+    let content = column![
+        accordion("GEOMETRY", String::new(), geo_open,
+            crate::Message::SettingsGroupToggled(0), geometry_content.into()),
+        accordion("DEPTHS", String::new(), dep_open,
+            crate::Message::SettingsGroupToggled(1), depths_content.into()),
+        accordion("MOTION", motion_summary, mot_open,
+            crate::Message::SettingsGroupToggled(2), motion_content.into()),
+        accordion("TOOLING", tooling_summary, tool_open,
+            crate::Message::SettingsGroupToggled(3), tooling_content.into()),
+    ]
+    .spacing(4);
+
+    step_shell(2, "SETTINGS", CardVisualState::Complete, is_expanded, summary, None, content.into())
 }
 
 pub fn rasterize_step<'a>(state: &'a crate::AppState) -> Element<'a, crate::Message> {
